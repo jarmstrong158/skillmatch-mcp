@@ -1,0 +1,5 @@
+data/profile.json
+data/applications.db
+__pycache__/
+*.pyc
+.mcp.json
