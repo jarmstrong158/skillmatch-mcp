@@ -102,18 +102,27 @@ After onboarding, your profile is saved locally and reused in every future conve
 
 **log_application** and **get_applications** maintain a local SQLite database so you can track where you have applied, when, and any notes about the process.
 
+**save_scouted_job** saves a job listing found during scouting. It validates the URL to reject search result pages (e.g. `indeed.com/q-*`) and only accepts direct posting links (e.g. `indeed.com/viewjob?jk=...`). It also deduplicates against existing scouted jobs and the applications database.
+
+**get_scouted_jobs** returns all scouted listings, optionally filtered to only unranked ones. **mark_jobs_ranked** marks all unranked jobs as ranked after a ranking report is generated.
+
 **get_portfolio** and **get_resume** can be called independently if you want Claude to review just your repos or just your resume.
 
 ## File Structure
 
 ```
 skillmatch-mcp/
-  server.py          # MCP server (stdio JSON-RPC)
-  requirements.txt   # python-docx dependency
-  CLAUDE.md          # Instructions for Claude
-  README.md          # This file
+  server.py              # MCP server (stdio JSON-RPC)
+  requirements.txt       # python-docx dependency
+  CLAUDE.md              # Instructions for Claude
+  README.md              # This file
+  email_ranked_jobs.py   # Conductor worker: emails ranked job reports
+  cowork_monitor.py      # Conductor worker: monitors Cowork VM, auto-recovers
+  cowork_tab.png         # Reference image for Cowork tab UI automation
   data/
-    .gitkeep         # Keeps the folder in git
-    profile.json     # Created on first setup (gitignored)
-    applications.db  # Created on first log (gitignored)
+    .gitkeep             # Keeps the folder in git
+    profile.json         # Created on first setup (gitignored)
+    applications.db      # Created on first log (gitignored)
+    scouted_jobs.json    # Scouted listings (gitignored)
+    ranked_jobs.md       # Latest ranked report (gitignored)
 ```
