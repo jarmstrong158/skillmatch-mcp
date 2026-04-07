@@ -1,5 +1,10 @@
 data/profile.json
 data/applications.db
+data/scouted_jobs.json
+data/ranked_jobs.md
+data/last_email_timestamp.txt
+data/cowork_status.txt
+data/*.png
 __pycache__/
 *.pyc
 .mcp.json

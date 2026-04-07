@@ -9,10 +9,43 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
+import re
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 PROFILE_PATH = os.path.join(DATA_DIR, "profile.json")
 DB_PATH = os.path.join(DATA_DIR, "applications.db")
+SCOUTED_PATH = os.path.join(DATA_DIR, "scouted_jobs.json")
+
+# URL patterns that are search result pages, NOT direct job postings
+BAD_URL_PATTERNS = [
+    r"indeed\.com/q-",            # indeed search results
+    r"indeed\.com/jobs\?",        # indeed search with params
+    r"indeed\.com/jobs$",         # indeed jobs landing
+    r"ziprecruiter\.com/Jobs/",   # ziprecruiter search aggregator
+    r"glassdoor\.com/Job/.*jobs", # glassdoor search results
+    r"builtin\.com/jobs/",        # builtin listing pages
+    r"linkedin\.com/jobs/search", # linkedin search
+    r"linkedin\.com/jobs$",       # linkedin jobs landing
+    r"remoterocketship\.com/jobs/",  # aggregator search pages
+    r"jobleads\.com/us/job/",     # jobleads aggregator
+    r"naukri\.com/",              # non-US job board
+    r"jobstreet\.com/",           # non-US job board
+    r"jooble\.org/",              # non-US job board
+    r"seek\.com\.au/",            # non-US job board
+]
+
+# URL patterns that are valid direct job postings
+GOOD_URL_PATTERNS = [
+    r"indeed\.com/viewjob\?jk=",
+    r"indeed\.com/cmp/.+",
+    r"greenhouse\.io/.+/jobs/\d+",
+    r"lever\.co/.+/[a-f0-9-]+",
+    r"ashbyhq\.com/.+/[a-f0-9-]+",
+    r"wellfound\.com/jobs/\d+",
+    r"linkedin\.com/jobs/view/\S+\d+",
+    r"remoterocketship\.com/us/company/.+/jobs/.+",
+]
 
 TOOLS = [
     {
@@ -153,6 +186,59 @@ TOOLS = [
     {
         "name": "get_applications",
         "description": "Return all tracked job applications, ordered by most recent first.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "save_scouted_job",
+        "description": (
+            "Save a scouted job listing to the tracked scouted_jobs.json file. "
+            "Validates the URL to ensure it is a DIRECT link to a specific job posting "
+            "(e.g. indeed.com/viewjob?jk=..., greenhouse.io/.../jobs/...) and rejects "
+            "search result page URLs (e.g. indeed.com/q-..., builtin.com/jobs/...). "
+            "Also deduplicates against existing scouted jobs and applications. "
+            "Returns {saved: true/false, reason: '...'} with clear feedback."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "company": {"type": "string", "description": "Company name"},
+                "role": {"type": "string", "description": "Job title / role name"},
+                "url": {
+                    "type": "string",
+                    "description": (
+                        "Direct URL to the specific job posting. Must be a direct link, "
+                        "NOT a search results page. For Indeed use indeed.com/viewjob?jk=JOBKEY "
+                        "or indeed.com/cmp/COMPANY. For Greenhouse use job-boards.greenhouse.io/company/jobs/ID."
+                    ),
+                },
+                "salary": {"type": "string", "description": "Salary or compensation range (optional)"},
+                "location": {"type": "string", "description": "Job location"},
+                "remote": {"type": "boolean", "description": "Whether the position is remote"},
+                "source": {"type": "string", "description": "Where the listing was found (e.g. indeed.com, greenhouse.io)"},
+            },
+            "required": ["company", "role", "url"],
+        },
+    },
+    {
+        "name": "get_scouted_jobs",
+        "description": (
+            "Return all scouted job listings from scouted_jobs.json. "
+            "Optionally filter to only unranked jobs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "unranked_only": {
+                    "type": "boolean",
+                    "description": "If true, only return jobs where ranked is false",
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
+        "name": "mark_jobs_ranked",
+        "description": "Mark all unranked scouted jobs as ranked. Returns the count of jobs marked.",
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
@@ -455,6 +541,145 @@ def handle_get_applications(_params):
         return {"error": f"Failed to read applications: {e}"}
 
 
+def _read_scouted_jobs():
+    """Read scouted_jobs.json, return list (empty list if missing/empty)."""
+    if not os.path.exists(SCOUTED_PATH):
+        return []
+    try:
+        with open(SCOUTED_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, Exception):
+        return []
+
+
+def _write_scouted_jobs(jobs):
+    """Write scouted jobs list to scouted_jobs.json."""
+    ensure_data_dir()
+    with open(SCOUTED_PATH, "w", encoding="utf-8") as f:
+        json.dump(jobs, f, indent=2)
+
+
+def _validate_job_url(url):
+    """Validate that a URL is a direct job posting, not a search results page.
+    Returns (is_valid, reason)."""
+    if not url or not url.startswith("http"):
+        return False, "URL must start with http:// or https://"
+
+    # Check against bad patterns first
+    for pattern in BAD_URL_PATTERNS:
+        if re.search(pattern, url, re.IGNORECASE):
+            return False, (
+                f"Rejected: URL matches search results page pattern '{pattern}'. "
+                "You must provide a direct link to the specific job posting. "
+                "For Indeed, use indeed.com/viewjob?jk=JOBKEY. "
+                "For Greenhouse, use job-boards.greenhouse.io/company/jobs/ID. "
+                "Search for the exact company + role title to find the direct link."
+            )
+
+    # Check if it matches a known good pattern (advisory, not required)
+    matches_good = any(re.search(p, url, re.IGNORECASE) for p in GOOD_URL_PATTERNS)
+    if not matches_good:
+        # Allow it but warn — could be a valid direct link we don't have a pattern for
+        return True, "URL accepted (not a known job board pattern — verify it links to a specific posting)"
+
+    return True, "URL validated"
+
+
+def _is_duplicate_scouted(company, role, scouted_jobs):
+    """Check if company+role already exists in scouted jobs (case-insensitive)."""
+    key = (company.lower().strip(), role.lower().strip())
+    for j in scouted_jobs:
+        existing_key = (j.get("company", "").lower().strip(), j.get("role", "").lower().strip())
+        if key == existing_key:
+            return True
+    return False
+
+
+def _is_duplicate_application(company, role):
+    """Check if company+role already exists in applications DB (case-insensitive)."""
+    if not os.path.exists(DB_PATH):
+        return False
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT company, role FROM applications").fetchall()
+        conn.close()
+        key = (company.lower().strip(), role.lower().strip())
+        for row in rows:
+            existing_key = (row["company"].lower().strip(), row["role"].lower().strip())
+            if key == existing_key:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def handle_save_scouted_job(params):
+    company = params.get("company", "").strip()
+    role = params.get("role", "").strip()
+    url = params.get("url", "").strip()
+
+    if not company or not role or not url:
+        return {"saved": False, "reason": "company, role, and url are all required"}
+
+    # Validate URL
+    is_valid, reason = _validate_job_url(url)
+    if not is_valid:
+        return {"saved": False, "reason": reason}
+
+    # Check for duplicates
+    scouted_jobs = _read_scouted_jobs()
+
+    if _is_duplicate_scouted(company, role, scouted_jobs):
+        return {"saved": False, "reason": f"Duplicate: '{company} — {role}' already exists in scouted jobs"}
+
+    if _is_duplicate_application(company, role):
+        return {"saved": False, "reason": f"Duplicate: '{company} — {role}' already exists in applications (already applied)"}
+
+    # Build entry
+    entry = {
+        "company": company,
+        "role": role,
+        "url": url,
+        "salary": params.get("salary"),
+        "location": params.get("location", ""),
+        "remote": params.get("remote", False),
+        "date_found": datetime.now(timezone.utc).isoformat(),
+        "source": params.get("source", ""),
+        "ranked": False,
+    }
+
+    scouted_jobs.append(entry)
+    _write_scouted_jobs(scouted_jobs)
+
+    url_note = f" ({reason})" if "not a known" in reason else ""
+    return {
+        "saved": True,
+        "reason": f"Saved: {company} — {role}{url_note}",
+        "total_scouted": len(scouted_jobs),
+    }
+
+
+def handle_get_scouted_jobs(params):
+    jobs = _read_scouted_jobs()
+    unranked_only = params.get("unranked_only", False)
+    if unranked_only:
+        jobs = [j for j in jobs if not j.get("ranked", False)]
+    return {"count": len(jobs), "jobs": jobs}
+
+
+def handle_mark_jobs_ranked(_params):
+    jobs = _read_scouted_jobs()
+    count = 0
+    for j in jobs:
+        if not j.get("ranked", False):
+            j["ranked"] = True
+            count += 1
+    _write_scouted_jobs(jobs)
+    return {"marked": count, "total": len(jobs)}
+
+
 HANDLERS = {
     "setup": handle_setup,
     "get_profile": handle_get_profile,
@@ -464,6 +689,9 @@ HANDLERS = {
     "analyze_fit": handle_analyze_fit,
     "log_application": handle_log_application,
     "get_applications": handle_get_applications,
+    "save_scouted_job": handle_save_scouted_job,
+    "get_scouted_jobs": handle_get_scouted_jobs,
+    "mark_jobs_ranked": handle_mark_jobs_ranked,
 }
 
 

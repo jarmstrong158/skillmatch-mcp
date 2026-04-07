@@ -43,6 +43,22 @@ Logs a job application to the SQLite database at `data/applications.db`. Creates
 ### get_applications
 Returns all tracked applications ordered by most recent first. Use this when the user asks about their application history or wants a status overview.
 
+### save_scouted_job
+Saves a scouted job listing to `data/scouted_jobs.json`. **Always use this tool instead of writing to the file directly.** It enforces:
+- **URL validation**: Rejects search result page URLs (e.g. `indeed.com/q-*`, `builtin.com/jobs/`, `ziprecruiter.com/Jobs/`). Only accepts direct job posting links (e.g. `indeed.com/viewjob?jk=...`, `greenhouse.io/.../jobs/123`, `lever.co/.../uuid`, `ashbyhq.com/.../uuid`).
+- **Deduplication**: Checks company+role (case-insensitive) against both scouted jobs and applications DB.
+- **Auto-timestamping**: Adds `date_found` automatically.
+
+Required: company, role, url. Optional: salary, location, remote (bool), source.
+
+If the URL is rejected, search Google for `"Company Name" "Role Title" site:indeed.com` (or the relevant job board) to find the direct link before trying again.
+
+### get_scouted_jobs
+Returns all scouted job listings from `scouted_jobs.json`. Pass `unranked_only: true` to filter to only unranked jobs.
+
+### mark_jobs_ranked
+Marks all unranked scouted jobs as ranked. Call this after generating a ranked report.
+
 ## When to Call Tools Automatically
 
 - **Start of conversation**: Call `get_profile` to check if onboarding is needed.
@@ -50,6 +66,8 @@ Returns all tracked applications ordered by most recent first. Use this when the
 - **User pastes a job description**: Call `analyze_fit` to gather data, then provide your analysis.
 - **User says they applied somewhere**: Call `log_application` to track it.
 - **User asks "what have I applied to"**: Call `get_applications`.
+- **Scouting jobs**: Always use `save_scouted_job` to save listings. NEVER write to scouted_jobs.json directly.
+- **Ranking jobs**: Call `get_scouted_jobs` with `unranked_only: true`, rank them, then call `mark_jobs_ranked`.
 
 ## Conversation Flow Examples
 
