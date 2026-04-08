@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "skillmatch-mcp"
+version = "1.0.0"
+description = "Job search and ranking pipeline accessible via MCP (Model Context Protocol)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+authors = [
+    { name = "Jonathan Armstrong", email = "jarmstrong158@gmail.com" },
+]
+keywords = ["mcp", "job-search", "claude", "model-context-protocol", "career"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "python-docx>=1.0.0",
+]
+
+[project.optional-dependencies]
+monitor = [
+    "pyautogui>=0.9.54",
+    "pygetwindow>=0.0.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/jarmstrong158/skillmatch-mcp"
+Repository = "https://github.com/jarmstrong158/skillmatch-mcp"
+Issues = "https://github.com/jarmstrong158/skillmatch-mcp/issues"
+
+[project.scripts]
+skillmatch-mcp = "server:main"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "server.py",
+    "email_ranked_jobs.py",
+    "cowork_monitor.py",
+    "cowork_tab.png",
+    "LICENSE",
+    "README.md",
+    "CLAUDE.md",
+    "data/.gitkeep",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"server.py" = "server.py"
+"email_ranked_jobs.py" = "email_ranked_jobs.py"
+"cowork_monitor.py" = "cowork_monitor.py"
+"cowork_tab.png" = "cowork_tab.png"
+"CLAUDE.md" = "CLAUDE.md"
