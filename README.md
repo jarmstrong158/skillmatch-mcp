@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.jarmstrong158/skillmatch-mcp -->
+
 # SkillMatch MCP
 
 Claude-powered job fit analyzer for people who prove their skills through work, not credentials.

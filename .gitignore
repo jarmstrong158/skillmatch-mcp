@@ -8,3 +8,5 @@ data/*.png
 __pycache__/
 *.pyc
 .mcp.json
+.mcpregistry_*
+dist/
