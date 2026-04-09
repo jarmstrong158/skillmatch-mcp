@@ -96,6 +96,21 @@ Claude: Got it. Your profile is saved. Let me search for jobs matching your targ
 
 After onboarding, your profile is saved locally and reused in every future conversation.
 
+### Extended Profile (optional)
+
+You can enrich your profile at any time by asking Claude to update it. These fields help Claude reason about nuanced fit:
+
+| Field | Type | Example |
+|---|---|---|
+| `work_style` | object | `{async_preferred: true, ic_vs_leadership: "ic", client_facing_tolerance: "none", team_size_preference: "small"}` |
+| `optimizing_for` | array | `["comp", "autonomy", "interesting_problems"]` |
+| `unlisted_skills` | array | `["MCP protocol implementation", "Windows installer packaging"]` |
+| `developing_skills` | array | `["TypeScript", "RAG pipelines"]` |
+| `dealbreaker_detail` | array | `[{dealbreaker: "on-call", hardness: "absolute"}, {dealbreaker: "relocation", hardness: "strong_preference"}]` |
+| `rejection_patterns` | array | `["roles that sounded like automation but were actually IT support"]` |
+
+These can be set during initial setup or added later with the `update_profile` tool.
+
 ## How It Works
 
 **search_jobs** builds a search query from your profile and any keywords you provide. Claude then uses that query with its web search capabilities to find real listings. The tool itself does not search the web.
@@ -107,6 +122,8 @@ After onboarding, your profile is saved locally and reused in every future conve
 **save_scouted_job** saves a job listing found during scouting. It validates the URL to reject search result pages (e.g. `indeed.com/q-*`) and only accepts direct posting links (e.g. `indeed.com/viewjob?jk=...`). It also deduplicates against existing scouted jobs and the applications database.
 
 **get_scouted_jobs** returns all scouted listings, optionally filtered to only unranked ones. **mark_jobs_ranked** marks all unranked jobs as ranked after a ranking report is generated.
+
+**update_profile** merges new or changed fields into your existing profile without re-running setup. Use it to add unlisted skills, update dealbreakers, or change any field incrementally.
 
 **get_portfolio** and **get_resume** can be called independently if you want Claude to review just your repos or just your resume.
 

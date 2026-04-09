@@ -82,6 +82,48 @@ TOOLS = [
                     "type": "string",
                     "description": "Absolute path to resume file (.txt, .md, or .docx)",
                 },
+                "work_style": {
+                    "type": "object",
+                    "description": "Work style preferences",
+                    "properties": {
+                        "async_preferred": {"type": "boolean"},
+                        "ic_vs_leadership": {"type": "string", "enum": ["ic", "leadership", "both"]},
+                        "client_facing_tolerance": {"type": "string", "enum": ["none", "occasional", "fine"]},
+                        "team_size_preference": {"type": "string"},
+                    },
+                },
+                "optimizing_for": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What the candidate prioritizes: comp, growth, stability, remote, interesting_problems, autonomy",
+                },
+                "unlisted_skills": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Skills the candidate has but aren't formalized on resume",
+                },
+                "developing_skills": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Skills actively being learned -- signals trajectory",
+                },
+                "dealbreaker_detail": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dealbreaker": {"type": "string"},
+                            "hardness": {"type": "string", "enum": ["absolute", "strong_preference", "negotiable"]},
+                            "notes": {"type": "string"},
+                        },
+                    },
+                    "description": "Detailed dealbreakers with hardness levels and notes",
+                },
+                "rejection_patterns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Types of roles that looked good but weren't, and brief reason why",
+                },
                 "confirm_overwrite": {
                     "type": "boolean",
                     "description": "Must be true to overwrite an existing profile",
@@ -241,6 +283,52 @@ TOOLS = [
         "description": "Mark all unranked scouted jobs as ranked. Returns the count of jobs marked.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "update_profile",
+        "description": (
+            "Update the user's profile with new or changed fields. Accepts any subset of profile "
+            "fields and merges them into the existing profile.json without requiring a full re-setup. "
+            "Useful for adding unlisted_skills, updating dealbreaker_detail, or changing any field."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "current_role": {"type": "string"},
+                "target_roles": {"type": "array", "items": {"type": "string"}},
+                "salary_floor": {"type": "integer"},
+                "remote_only": {"type": "boolean"},
+                "location": {"type": "string"},
+                "dealbreakers": {"type": "array", "items": {"type": "string"}},
+                "github_url": {"type": "string"},
+                "resume_path": {"type": "string"},
+                "work_style": {
+                    "type": "object",
+                    "properties": {
+                        "async_preferred": {"type": "boolean"},
+                        "ic_vs_leadership": {"type": "string", "enum": ["ic", "leadership", "both"]},
+                        "client_facing_tolerance": {"type": "string", "enum": ["none", "occasional", "fine"]},
+                        "team_size_preference": {"type": "string"},
+                    },
+                },
+                "optimizing_for": {"type": "array", "items": {"type": "string"}},
+                "unlisted_skills": {"type": "array", "items": {"type": "string"}},
+                "developing_skills": {"type": "array", "items": {"type": "string"}},
+                "dealbreaker_detail": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dealbreaker": {"type": "string"},
+                            "hardness": {"type": "string", "enum": ["absolute", "strong_preference", "negotiable"]},
+                            "notes": {"type": "string"},
+                        },
+                    },
+                },
+                "rejection_patterns": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
 ]
 
 
@@ -362,6 +450,12 @@ def handle_setup(params):
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    # Optional extended profile fields
+    for key in ("work_style", "optimizing_for", "unlisted_skills",
+                "developing_skills", "dealbreaker_detail", "rejection_patterns"):
+        if key in params:
+            profile[key] = params[key]
+
     with open(PROFILE_PATH, "w", encoding="utf-8") as f:
         json.dump(profile, f, indent=2)
 
@@ -447,6 +541,57 @@ def handle_search_jobs(params):
     }
 
 
+def _build_profile_context(profile):
+    """Format extended profile fields into a natural language summary."""
+    lines = []
+
+    ws = profile.get("work_style")
+    if ws:
+        parts = []
+        if ws.get("async_preferred"):
+            parts.append("prefers async")
+        ic = ws.get("ic_vs_leadership")
+        if ic:
+            parts.append(f"{ic}-focused")
+        cft = ws.get("client_facing_tolerance")
+        if cft:
+            parts.append(f"client-facing: {cft}")
+        tsp = ws.get("team_size_preference")
+        if tsp:
+            parts.append(f"{tsp} teams")
+        if parts:
+            lines.append(f"Work style: {', '.join(parts)}")
+
+    opt = profile.get("optimizing_for")
+    if opt:
+        lines.append(f"Optimizing for: {', '.join(opt)}")
+
+    unlisted = profile.get("unlisted_skills")
+    if unlisted:
+        lines.append(f"Unlisted skills: {', '.join(unlisted)}")
+
+    developing = profile.get("developing_skills")
+    if developing:
+        lines.append(f"Developing: {', '.join(developing)}")
+
+    dbd = profile.get("dealbreaker_detail")
+    if dbd:
+        db_parts = []
+        for d in dbd:
+            name = d.get("dealbreaker", "")
+            hardness = d.get("hardness", "")
+            entry = f"{name} ({hardness})" if hardness else name
+            db_parts.append(entry)
+        if db_parts:
+            lines.append(f"Dealbreakers: {', '.join(db_parts)}")
+
+    rp = profile.get("rejection_patterns")
+    if rp:
+        lines.append(f"Rejection patterns: {'; '.join(rp)}")
+
+    return "\n".join(lines) if lines else None
+
+
 def handle_analyze_fit(params):
     job_description = params.get("job_description", "")
 
@@ -481,14 +626,19 @@ def handle_analyze_fit(params):
     else:
         resume_error = "No resume_path in profile."
 
+    # Build rich profile context summary for Claude
+    profile_context = _build_profile_context(profile)
+
     return {
         "instructions": (
             "Analyze the fit between this job description and the user's profile, portfolio, and resume. "
             "Identify matching skills, gaps, and talking points. Consider the user's dealbreakers and salary floor. "
+            "Project evidence and demonstrated output can and should compensate for formal experience gaps. "
             "Give a clear recommendation with reasoning."
         ),
         "job_description": job_description,
         "profile": profile,
+        "profile_context": profile_context,
         "portfolio": portfolio,
         "portfolio_error": portfolio_error,
         "resume": resume_content,
@@ -680,6 +830,34 @@ def handle_mark_jobs_ranked(_params):
     return {"marked": count, "total": len(jobs)}
 
 
+def handle_update_profile(params):
+    profile = read_profile()
+    if profile is None:
+        return {"error": "No profile found. Run setup first to create one."}
+
+    updatable = (
+        "name", "current_role", "target_roles", "salary_floor", "remote_only",
+        "location", "dealbreakers", "github_url", "resume_path",
+        "work_style", "optimizing_for", "unlisted_skills", "developing_skills",
+        "dealbreaker_detail", "rejection_patterns",
+    )
+    updated = []
+    for key in updatable:
+        if key in params:
+            profile[key] = params[key]
+            updated.append(key)
+
+    if not updated:
+        return {"error": "No valid fields provided to update."}
+
+    profile["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2)
+
+    return {"success": True, "updated_fields": updated, "profile": profile}
+
+
 HANDLERS = {
     "setup": handle_setup,
     "get_profile": handle_get_profile,
@@ -692,6 +870,7 @@ HANDLERS = {
     "save_scouted_job": handle_save_scouted_job,
     "get_scouted_jobs": handle_get_scouted_jobs,
     "mark_jobs_ranked": handle_mark_jobs_ranked,
+    "update_profile": handle_update_profile,
 }
 
 

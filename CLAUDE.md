@@ -59,9 +59,27 @@ Returns all scouted job listings from `scouted_jobs.json`. Pass `unranked_only: 
 ### mark_jobs_ranked
 Marks all unranked scouted jobs as ranked. Call this after generating a ranked report.
 
+### update_profile
+Merges new or changed fields into the existing profile without requiring a full re-setup. Accepts any subset of profile fields. Use this when the user wants to add unlisted_skills, update dealbreaker_detail, change their salary floor, or modify any other field incrementally.
+
+## Extended Profile Fields (all optional)
+
+These fields give Claude richer context for fit analysis. They can be set during `setup` or added later with `update_profile`.
+
+- **work_style**: Object with `async_preferred` (bool), `ic_vs_leadership` (ic/leadership/both), `client_facing_tolerance` (none/occasional/fine), `team_size_preference` (string).
+- **optimizing_for**: Array of priorities like comp, growth, stability, remote, interesting_problems, autonomy.
+- **unlisted_skills**: Skills the candidate has but aren't on their resume (e.g. MCP protocol implementation, SimPy simulation).
+- **developing_skills**: Skills actively being learned -- signals trajectory, not current mastery.
+- **dealbreaker_detail**: Array of objects with `dealbreaker` (string), `hardness` (absolute/strong_preference/negotiable), `notes` (string). More nuanced than the flat `dealbreakers` list.
+- **rejection_patterns**: Types of roles that looked good on paper but weren't a fit, and why.
+
+## Fit Analysis Philosophy
+
+When analyzing job fit, project evidence and demonstrated output can and should compensate for formal experience gaps. A candidate with 4 months of building real shipped projects (MCP servers, RL agents, CI/CD pipelines) has more signal than years of credential-only experience. Weight GitHub portfolio and project complexity heavily when the resume shows a non-traditional path.
+
 ## When to Call Tools Automatically
 
-- **Start of conversation**: Call `get_profile` to check if onboarding is needed.
+- **Start of conversation**: Call `get_profile` to check if onboarding is needed. Use the extended profile fields (work_style, optimizing_for, etc.) when reasoning about fit.
 - **User asks "find me jobs" or similar**: Call `search_jobs`, then use the result with web search.
 - **User pastes a job description**: Call `analyze_fit` to gather data, then provide your analysis.
 - **User says they applied somewhere**: Call `log_application` to track it.
