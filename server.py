@@ -17,6 +17,8 @@ PROFILE_PATH = os.path.join(DATA_DIR, "profile.json")
 DB_PATH = os.path.join(DATA_DIR, "applications.db")
 SCOUTED_PATH = os.path.join(DATA_DIR, "scouted_jobs.json")
 
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
 # URL patterns that are search result pages, NOT direct job postings
 BAD_URL_PATTERNS = [
     r"indeed\.com/q-",            # indeed search results
@@ -80,7 +82,15 @@ TOOLS = [
                 },
                 "resume_path": {
                     "type": "string",
-                    "description": "Absolute path to resume file (.txt, .md, or .docx)",
+                    "description": "Absolute path to resume file (.txt, .md, or .docx). Optional if resume_text is provided.",
+                },
+                "resume_text": {
+                    "type": "string",
+                    "description": "Resume content as plain text or markdown. Use this instead of resume_path for portability.",
+                },
+                "linkedin_url": {
+                    "type": "string",
+                    "description": "Public LinkedIn profile URL for supplemental work history (optional)",
                 },
                 "work_style": {
                     "type": "object",
@@ -139,7 +149,6 @@ TOOLS = [
                 "location",
                 "dealbreakers",
                 "github_url",
-                "resume_path",
             ],
         },
     },
@@ -227,8 +236,16 @@ TOOLS = [
     },
     {
         "name": "get_applications",
-        "description": "Return all tracked job applications, ordered by most recent first.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": "Return all tracked job applications, ordered by most recent first. Optionally filter by status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: applied, screening, interview, offer, rejected, ghosted (optional)",
+                },
+            },
+        },
     },
     {
         "name": "save_scouted_job",
@@ -281,6 +298,90 @@ TOOLS = [
     {
         "name": "mark_jobs_ranked",
         "description": "Mark all unranked scouted jobs as ranked. Returns the count of jobs marked.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "parse_jd",
+        "description": (
+            "Parse a job description into structured signal: hard requirements, nice-to-haves, "
+            "responsibilities, red flags, compensation signals, role type, experience level, and domain. "
+            "Uses Claude API internally. Returns structured JSON for better fit reasoning."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_description": {
+                    "type": "string",
+                    "description": "The full job description text to parse",
+                },
+            },
+            "required": ["job_description"],
+        },
+    },
+    {
+        "name": "update_application",
+        "description": (
+            "Update an existing application by ID. Accepts any subset of fields: status, notes, "
+            "follow_up_due_date, response_received, outcome. Automatically updates last_activity_date."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "integer", "description": "Application ID to update"},
+                "status": {
+                    "type": "string",
+                    "description": "New status: applied, screening, interview, offer, rejected, ghosted",
+                },
+                "notes": {"type": "string"},
+                "follow_up_due_date": {"type": "string", "description": "ISO date (YYYY-MM-DD) for follow-up reminder"},
+                "response_received": {"type": "boolean"},
+                "outcome": {"type": "string"},
+            },
+            "required": ["id"],
+        },
+    },
+    {
+        "name": "get_follow_ups",
+        "description": (
+            "Return all applications where follow_up_due_date is today or earlier and status is "
+            "still applied or screening. Shows what needs attention."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_application_patterns",
+        "description": (
+            "After 10+ applications, analyze the full history to find patterns: which role types "
+            "get responses, which skills resonate, which red flags recur in silent roles, and "
+            "recommended search adjustments. Uses Claude API internally."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "add_resume",
+        "description": (
+            "Add a new resume variant to the profile. Each variant targets specific role types "
+            "for automatic selection during fit analysis."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Unique identifier for this variant (e.g. 'ai_eng')"},
+                "label": {"type": "string", "description": "Human-readable label (e.g. 'AI Engineering')"},
+                "role_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of role_type values this resume targets (e.g. ['ai_engineering', 'ml_engineering'])",
+                },
+                "path": {"type": "string", "description": "Absolute path to resume file (optional if text provided)"},
+                "text": {"type": "string", "description": "Resume content as plain text/markdown (optional if path provided)"},
+            },
+            "required": ["id", "label", "role_types"],
+        },
+    },
+    {
+        "name": "list_resumes",
+        "description": "Return all stored resume variants with their labels and target role types.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -403,6 +504,124 @@ def fetch_github_repos(username):
     return repos, None
 
 
+def _call_claude(prompt, max_tokens=2048):
+    """Call Claude API directly. Returns response text or None on failure."""
+    if not ANTHROPIC_API_KEY:
+        return None, "ANTHROPIC_API_KEY not set"
+    body = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        text = data.get("content", [{}])[0].get("text", "")
+        return text, None
+    except Exception as e:
+        return None, f"Claude API error: {e}"
+
+
+def parse_job_description(jd_text):
+    """Parse a job description into structured signal via Claude API.
+    Returns (parsed_dict, error_string). Falls back gracefully."""
+    prompt = (
+        "Parse this job description into structured JSON. Return ONLY valid JSON, no preamble or markdown.\n\n"
+        "Required schema:\n"
+        '{\n'
+        '  "hard_requirements": ["list of non-negotiable requirements"],\n'
+        '  "nice_to_haves": ["list of preferred but optional skills"],\n'
+        '  "responsibilities": ["actual day-to-day tasks, not aspirational language"],\n'
+        '  "red_flags": ["on-call, travel, clearance, relocation, contract ambiguity, vague comp"],\n'
+        '  "compensation_signals": {\n'
+        '    "listed_salary": "string or null",\n'
+        '    "estimated_range": "string or null",\n'
+        '    "equity_mentioned": false,\n'
+        '    "contract_vs_fulltime": "string"\n'
+        '  },\n'
+        '  "role_type": "one of: ai_engineering, automation_rpa, ml_engineering, data_engineering, ops_adjacent, other",\n'
+        '  "experience_level": "one of: entry, mid, senior, staff, unknown",\n'
+        '  "domain": "industry or domain the company operates in"\n'
+        '}\n\n'
+        "Job description:\n" + jd_text
+    )
+    text, err = _call_claude(prompt, max_tokens=2048)
+    if err:
+        return None, err
+    # Extract JSON from response (handle potential markdown fencing)
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text), None
+    except json.JSONDecodeError as e:
+        return None, f"Failed to parse Claude response as JSON: {e}"
+
+
+def _resolve_resume(profile):
+    """Resolve resume content from profile. Priority: resume_text > resume_path.
+    Returns (content, source_label, error)."""
+    # Direct text takes priority
+    resume_text = profile.get("resume_text")
+    if resume_text:
+        return resume_text, "resume_text", None
+
+    # File path fallback
+    resume_path = profile.get("resume_path", "")
+    if resume_path:
+        content, err = read_resume_file(resume_path)
+        if err:
+            return None, "resume_path", err
+        return content, "resume_path", None
+
+    return None, None, "No resume source in profile (set resume_text or resume_path)."
+
+
+def _select_resume_for_role(profile, role_type):
+    """Select the best resume variant for a given role_type.
+    Returns (content, label, source, error)."""
+    resumes = profile.get("resumes", [])
+    if not resumes:
+        # Fall back to single resume
+        content, source, err = _resolve_resume(profile)
+        return content, "default", source, err
+
+    # Find matching variant by role_type
+    for r in resumes:
+        if role_type and role_type in r.get("role_types", []):
+            text = r.get("text")
+            if text:
+                return text, r.get("label", "matched"), "resume_text", None
+            path = r.get("path")
+            if path:
+                content, err = read_resume_file(path)
+                return content, r.get("label", "matched"), "resume_path", err
+
+    # No match — use first variant or default
+    first = resumes[0]
+    text = first.get("text")
+    if text:
+        return text, first.get("label", "default"), "resume_text", None
+    path = first.get("path")
+    if path:
+        content, err = read_resume_file(path)
+        return content, first.get("label", "default"), "resume_path", err
+
+    # Fall back to single resume
+    content, source, err = _resolve_resume(profile)
+    return content, "default", source, err
+
+
 def init_db():
     ensure_data_dir()
     conn = sqlite3.connect(DB_PATH)
@@ -415,9 +634,26 @@ def init_db():
             url TEXT,
             status TEXT DEFAULT 'applied',
             notes TEXT,
-            applied_at TEXT NOT NULL
+            applied_at TEXT NOT NULL,
+            last_activity_date TEXT,
+            follow_up_due_date TEXT,
+            response_received INTEGER DEFAULT 0,
+            outcome TEXT
         )"""
     )
+    conn.commit()
+    # Migrate existing tables — add columns if missing
+    cursor = conn.execute("PRAGMA table_info(applications)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    migrations = {
+        "last_activity_date": "TEXT",
+        "follow_up_due_date": "TEXT",
+        "response_received": "INTEGER DEFAULT 0",
+        "outcome": "TEXT",
+    }
+    for col, col_type in migrations.items():
+        if col not in existing_cols:
+            conn.execute(f"ALTER TABLE applications ADD COLUMN {col} {col_type}")
     conn.commit()
     return conn
 
@@ -446,12 +682,12 @@ def handle_setup(params):
         "location": params["location"],
         "dealbreakers": params["dealbreakers"],
         "github_url": params["github_url"],
-        "resume_path": params["resume_path"],
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # Optional extended profile fields
-    for key in ("work_style", "optimizing_for", "unlisted_skills",
+    # Optional fields
+    for key in ("resume_path", "resume_text", "linkedin_url",
+                "work_style", "optimizing_for", "unlisted_skills",
                 "developing_skills", "dealbreaker_detail", "rejection_patterns"):
         if key in params:
             profile[key] = params[key]
@@ -494,15 +730,11 @@ def handle_get_resume(_params):
     if profile is None:
         return {"error": "No profile found. Run setup first."}
 
-    resume_path = profile.get("resume_path", "")
-    if not resume_path:
-        return {"error": "No resume_path in profile. Run setup again to add it."}
-
-    content, err = read_resume_file(resume_path)
+    content, source, err = _resolve_resume(profile)
     if err:
         return {"error": err}
 
-    return {"file": resume_path, "content": content}
+    return {"source": source, "content": content}
 
 
 def handle_search_jobs(params):
@@ -599,6 +831,14 @@ def handle_analyze_fit(params):
     if profile is None:
         return {"error": "No profile found. Run setup first."}
 
+    # Phase 2: Parse JD into structured signal (graceful fallback)
+    parsed_jd = None
+    parse_error = None
+    parsed_jd, parse_error = parse_job_description(job_description)
+
+    # Determine role_type for resume selection
+    role_type = parsed_jd.get("role_type") if parsed_jd else None
+
     # Fetch portfolio
     github_url = profile.get("github_url", "")
     portfolio = None
@@ -613,37 +853,42 @@ def handle_analyze_fit(params):
     else:
         portfolio_error = "No github_url in profile."
 
-    # Fetch resume
-    resume_content = None
-    resume_error = None
-    resume_path = profile.get("resume_path", "")
-    if resume_path:
-        content, err = read_resume_file(resume_path)
-        if err:
-            resume_error = err
-        else:
-            resume_content = content
-    else:
-        resume_error = "No resume_path in profile."
+    # Phase 5: Select best resume variant for this role type
+    resume_content, resume_label, resume_source, resume_error = _select_resume_for_role(profile, role_type)
 
     # Build rich profile context summary for Claude
     profile_context = _build_profile_context(profile)
 
-    return {
-        "instructions": (
-            "Analyze the fit between this job description and the user's profile, portfolio, and resume. "
-            "Identify matching skills, gaps, and talking points. Consider the user's dealbreakers and salary floor. "
-            "Project evidence and demonstrated output can and should compensate for formal experience gaps. "
-            "Give a clear recommendation with reasoning."
-        ),
+    instructions = (
+        "Analyze the fit between this job description and the user's profile, portfolio, and resume. "
+    )
+    if parsed_jd:
+        instructions += (
+            "A structured parse of the JD is provided — use it to distinguish genuine hard-requirement gaps "
+            "from nice-to-have gaps. Flag any red_flags found. Use compensation_signals for salary alignment "
+            "even when salary isn't explicitly listed. "
+        )
+    instructions += (
+        "Weight project evidence heavily when hard requirements overlap with the GitHub portfolio. "
+        "Project evidence and demonstrated output can and should compensate for formal experience gaps. "
+        "Consider the user's dealbreakers and salary floor. Give a clear recommendation with reasoning."
+    )
+
+    result = {
+        "instructions": instructions,
+        "parsed_jd": parsed_jd,
+        "parse_error": parse_error,
         "job_description": job_description,
         "profile": profile,
         "profile_context": profile_context,
         "portfolio": portfolio,
         "portfolio_error": portfolio_error,
         "resume": resume_content,
+        "resume_label": resume_label,
+        "resume_source": resume_source,
         "resume_error": resume_error,
     }
+    return result
 
 
 def handle_log_application(params):
@@ -673,7 +918,7 @@ def handle_log_application(params):
         return {"error": f"Failed to log application: {e}"}
 
 
-def handle_get_applications(_params):
+def handle_get_applications(params):
     if not os.path.exists(DB_PATH):
         return {
             "applications": [],
@@ -681,14 +926,212 @@ def handle_get_applications(_params):
         }
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = init_db()
         conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM applications ORDER BY applied_at DESC").fetchall()
+        status_filter = params.get("status")
+        if status_filter:
+            rows = conn.execute(
+                "SELECT * FROM applications WHERE status = ? ORDER BY applied_at DESC",
+                (status_filter,),
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM applications ORDER BY applied_at DESC").fetchall()
         conn.close()
         applications = [dict(row) for row in rows]
         return {"count": len(applications), "applications": applications}
     except Exception as e:
         return {"error": f"Failed to read applications: {e}"}
+
+
+def handle_parse_jd(params):
+    jd = params.get("job_description", "")
+    if not jd:
+        return {"error": "job_description is required"}
+    parsed, err = parse_job_description(jd)
+    if err:
+        return {"error": err}
+    return parsed
+
+
+def handle_update_application(params):
+    app_id = params.get("id")
+    if app_id is None:
+        return {"error": "id is required"}
+
+    try:
+        conn = init_db()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM applications WHERE id = ?", (app_id,)).fetchone()
+        if not row:
+            conn.close()
+            return {"error": f"No application found with id {app_id}"}
+
+        updates = []
+        values = []
+        for field in ("status", "notes", "follow_up_due_date", "outcome"):
+            if field in params:
+                updates.append(f"{field} = ?")
+                values.append(params[field])
+        if "response_received" in params:
+            updates.append("response_received = ?")
+            values.append(1 if params["response_received"] else 0)
+
+        if not updates:
+            conn.close()
+            return {"error": "No valid fields to update"}
+
+        updates.append("last_activity_date = ?")
+        values.append(datetime.now(timezone.utc).isoformat())
+        values.append(app_id)
+
+        conn.execute(f"UPDATE applications SET {', '.join(updates)} WHERE id = ?", values)
+        conn.commit()
+
+        row = conn.execute("SELECT * FROM applications WHERE id = ?", (app_id,)).fetchone()
+        conn.close()
+        return {"success": True, "application": dict(row)}
+    except Exception as e:
+        return {"error": f"Failed to update application: {e}"}
+
+
+def handle_get_follow_ups(_params):
+    try:
+        conn = init_db()
+        conn.row_factory = sqlite3.Row
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        rows = conn.execute(
+            "SELECT * FROM applications WHERE follow_up_due_date IS NOT NULL "
+            "AND follow_up_due_date <= ? AND status IN ('applied', 'screening') "
+            "ORDER BY follow_up_due_date ASC",
+            (today,),
+        ).fetchall()
+        conn.close()
+
+        follow_ups = []
+        for row in rows:
+            d = dict(row)
+            applied = d.get("applied_at", "")[:10]
+            if applied:
+                try:
+                    days = (datetime.now(timezone.utc).date() - datetime.fromisoformat(applied).date()).days
+                except Exception:
+                    days = None
+            else:
+                days = None
+            d["days_since_applied"] = days
+            follow_ups.append(d)
+
+        return {"count": len(follow_ups), "follow_ups": follow_ups}
+    except Exception as e:
+        return {"error": f"Failed to get follow-ups: {e}"}
+
+
+def handle_get_application_patterns(_params):
+    try:
+        conn = init_db()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM applications ORDER BY applied_at DESC").fetchall()
+        conn.close()
+        applications = [dict(row) for row in rows]
+    except Exception as e:
+        return {"error": f"Failed to read applications: {e}"}
+
+    if len(applications) < 10:
+        return {
+            "error": f"Need at least 10 applications for pattern analysis. Currently have {len(applications)}.",
+            "count": len(applications),
+        }
+
+    summary = json.dumps(applications, indent=2, default=str)
+    prompt = (
+        "Analyze this job application history and return JSON with these fields:\n"
+        "- responding_role_types: which role types/titles are getting responses\n"
+        "- silent_role_types: which role types get no response\n"
+        "- resonating_skills: skills or background elements that seem to correlate with responses\n"
+        "- recurring_red_flags: red flags that appeared in roles that didn't respond\n"
+        "- recommended_adjustments: specific changes to search criteria or application strategy\n\n"
+        "Return ONLY valid JSON, no preamble.\n\n"
+        "Application history:\n" + summary
+    )
+    text, err = _call_claude(prompt, max_tokens=2048)
+    if err:
+        return {"error": err}
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {"raw_analysis": text}
+
+
+def handle_add_resume(params):
+    profile = read_profile()
+    if profile is None:
+        return {"error": "No profile found. Run setup first."}
+
+    rid = params.get("id", "").strip()
+    label = params.get("label", "").strip()
+    role_types = params.get("role_types", [])
+    path = params.get("path")
+    text = params.get("text")
+
+    if not rid or not label or not role_types:
+        return {"error": "id, label, and role_types are all required"}
+    if not path and not text:
+        return {"error": "Either path or text must be provided"}
+
+    resumes = profile.get("resumes", [])
+
+    # Check for duplicate id
+    for r in resumes:
+        if r.get("id") == rid:
+            return {"error": f"Resume variant with id '{rid}' already exists. Use a different id."}
+
+    entry = {"id": rid, "label": label, "role_types": role_types}
+    if text:
+        entry["text"] = text
+    if path:
+        entry["path"] = path
+
+    resumes.append(entry)
+    profile["resumes"] = resumes
+    profile["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+    with open(PROFILE_PATH, "w", encoding="utf-8") as f:
+        json.dump(profile, f, indent=2)
+
+    return {"success": True, "resume_count": len(resumes), "added": entry}
+
+
+def handle_list_resumes(_params):
+    profile = read_profile()
+    if profile is None:
+        return {"error": "No profile found. Run setup first."}
+
+    resumes = profile.get("resumes", [])
+    summary = []
+    for r in resumes:
+        summary.append({
+            "id": r.get("id"),
+            "label": r.get("label"),
+            "role_types": r.get("role_types", []),
+            "has_text": bool(r.get("text")),
+            "has_path": bool(r.get("path")),
+        })
+
+    default_source = None
+    if profile.get("resume_text"):
+        default_source = "resume_text"
+    elif profile.get("resume_path"):
+        default_source = "resume_path"
+
+    return {
+        "variants": summary,
+        "variant_count": len(resumes),
+        "default_resume_source": default_source,
+    }
 
 
 def _read_scouted_jobs():
@@ -837,9 +1280,9 @@ def handle_update_profile(params):
 
     updatable = (
         "name", "current_role", "target_roles", "salary_floor", "remote_only",
-        "location", "dealbreakers", "github_url", "resume_path",
-        "work_style", "optimizing_for", "unlisted_skills", "developing_skills",
-        "dealbreaker_detail", "rejection_patterns",
+        "location", "dealbreakers", "github_url", "resume_path", "resume_text",
+        "linkedin_url", "work_style", "optimizing_for", "unlisted_skills",
+        "developing_skills", "dealbreaker_detail", "rejection_patterns",
     )
     updated = []
     for key in updatable:
@@ -871,6 +1314,12 @@ HANDLERS = {
     "get_scouted_jobs": handle_get_scouted_jobs,
     "mark_jobs_ranked": handle_mark_jobs_ranked,
     "update_profile": handle_update_profile,
+    "parse_jd": handle_parse_jd,
+    "update_application": handle_update_application,
+    "get_follow_ups": handle_get_follow_ups,
+    "get_application_patterns": handle_get_application_patterns,
+    "add_resume": handle_add_resume,
+    "list_resumes": handle_list_resumes,
 }
 
 

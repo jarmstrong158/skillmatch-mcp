@@ -115,17 +115,40 @@ These can be set during initial setup or added later with the `update_profile` t
 
 **search_jobs** builds a search query from your profile and any keywords you provide. Claude then uses that query with its web search capabilities to find real listings. The tool itself does not search the web.
 
-**analyze_fit** bundles your GitHub portfolio, resume text, and the job description together. Claude then reasons about the fit, identifying skill matches, gaps, and talking points. The tool gathers the data; Claude does the thinking.
+**analyze_fit** runs a two-step process. First it parses the job description into structured signal (hard requirements, nice-to-haves, red flags, compensation signals, role type) via the Claude API. Then it fetches your portfolio and auto-selects the best resume variant for the detected role type. Claude sees structured signal before raw marketing copy.
 
-**log_application** and **get_applications** maintain a local SQLite database so you can track where you have applied, when, and any notes about the process.
+**parse_jd** is the standalone JD parser. Use it independently to pre-process a job description without running the full fit analysis.
 
-**save_scouted_job** saves a job listing found during scouting. It validates the URL to reject search result pages (e.g. `indeed.com/q-*`) and only accepts direct posting links (e.g. `indeed.com/viewjob?jk=...`). It also deduplicates against existing scouted jobs and the applications database.
+**log_application**, **get_applications**, and **update_application** form a job search CRM. Track status (applied, screening, interview, offer, rejected, ghosted), set follow-up dates, and record outcomes.
+
+**get_follow_ups** shows applications that need attention — where the follow-up date has passed and you're still waiting.
+
+**get_application_patterns** analyzes your full application history (10+ needed) to find which role types get responses, which skills resonate, and recommends search adjustments.
+
+**save_scouted_job** saves a job listing found during scouting. It validates the URL to reject search result pages and deduplicates against existing scouted jobs and applications.
 
 **get_scouted_jobs** returns all scouted listings, optionally filtered to only unranked ones. **mark_jobs_ranked** marks all unranked jobs as ranked after a ranking report is generated.
 
-**update_profile** merges new or changed fields into your existing profile without re-running setup. Use it to add unlisted skills, update dealbreakers, or change any field incrementally.
+**add_resume** and **list_resumes** manage multiple resume variants. Each variant targets specific role types (e.g. "AI Engineering" targets `ai_engineering` and `ml_engineering`). During fit analysis, the best variant is auto-selected based on the JD's detected role type.
+
+**update_profile** merges new or changed fields into your existing profile without re-running setup.
 
 **get_portfolio** and **get_resume** can be called independently if you want Claude to review just your repos or just your resume.
+
+## Quick Start (No File Paths)
+
+For the simplest setup, paste your resume directly — no local files needed:
+
+```
+You: Help me find a job.
+Claude: What is your name?
+You: Alex
+Claude: What roles are you targeting?
+You: AI engineer, ML engineer
+Claude: Paste your resume or provide a file path.
+You: [paste resume text here]
+Claude: Profile saved. Let me search for jobs.
+```
 
 ## File Structure
 

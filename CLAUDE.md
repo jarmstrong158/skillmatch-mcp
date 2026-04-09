@@ -15,7 +15,8 @@ Questions to ask during onboarding:
 6. What is your location?
 7. What are your dealbreakers? (collect as a list)
 8. What is your GitHub profile URL?
-9. Where is your resume file? (absolute path, supports .txt, .md, .docx)
+9. Where is your resume file? (absolute path, supports .txt, .md, .docx — OR paste resume text directly)
+10. (Optional) What is your LinkedIn profile URL?
 
 ## Tools
 
@@ -35,13 +36,25 @@ Reads the resume file from the path stored in the profile. Returns raw text cont
 **Does NOT search the web.** Accepts a query string and combines it with the user's profile (target roles, salary floor, remote preference, location) to build an optimized search query. Returns the query string and filtering instructions. After calling this tool, use the returned query with a web search tool to find actual listings.
 
 ### analyze_fit
-**Does NOT perform analysis.** Accepts a job description string. Internally fetches the user's GitHub portfolio and resume, then returns all three (job description, portfolio, resume) bundled together in a structured format. Use the returned data to reason about the fit: identify matching skills, gaps, talking points, and dealbreaker conflicts. Give the user a clear recommendation.
+**Two-step process.** Accepts a job description string. First parses the JD into structured signal (hard requirements, nice-to-haves, red flags, compensation signals, role type) via the Claude API. Then fetches portfolio and selects the best resume variant for the detected role type. Returns everything bundled. Use `parsed_jd` to distinguish hard-requirement gaps from nice-to-have gaps. Flag red flags. Weight project evidence heavily when hard requirements overlap with GitHub portfolio.
+
+### parse_jd
+Standalone JD parser. Accepts a job description and returns structured JSON: hard_requirements, nice_to_haves, responsibilities, red_flags, compensation_signals, role_type, experience_level, domain. Requires ANTHROPIC_API_KEY env var.
 
 ### log_application
 Logs a job application to the SQLite database at `data/applications.db`. Creates the database automatically on first use. Required fields: company, role. Optional: salary, url, status (default "applied"), notes. Call this after the user decides to apply somewhere.
 
 ### get_applications
-Returns all tracked applications ordered by most recent first. Use this when the user asks about their application history or wants a status overview.
+Returns all tracked applications ordered by most recent first. Supports optional `status` filter (applied, screening, interview, offer, rejected, ghosted).
+
+### update_application
+Updates an existing application by ID. Accepts any subset: status, notes, follow_up_due_date, response_received, outcome. Automatically updates last_activity_date. Use when the user gets a response, schedules an interview, or wants to update status.
+
+### get_follow_ups
+Returns applications where follow_up_due_date is today or earlier and status is still applied or screening. Shows what needs attention. Call proactively when the user asks about their pipeline.
+
+### get_application_patterns
+After 10+ applications, analyzes the full history to find patterns: which role types get responses, which skills resonate, recurring red flags in silent roles, and recommended search adjustments. Requires ANTHROPIC_API_KEY.
 
 ### save_scouted_job
 Saves a scouted job listing to `data/scouted_jobs.json`. **Always use this tool instead of writing to the file directly.** It enforces:
@@ -58,6 +71,12 @@ Returns all scouted job listings from `scouted_jobs.json`. Pass `unranked_only: 
 
 ### mark_jobs_ranked
 Marks all unranked scouted jobs as ranked. Call this after generating a ranked report.
+
+### add_resume
+Adds a new resume variant to the profile's `resumes` array. Each variant has an id, label, target role_types, and either text or path. During fit analysis, the best variant is auto-selected based on the JD's detected role_type.
+
+### list_resumes
+Returns all stored resume variants with their labels and target role types.
 
 ### update_profile
 Merges new or changed fields into the existing profile without requiring a full re-setup. Accepts any subset of profile fields. Use this when the user wants to add unlisted_skills, update dealbreaker_detail, change their salary floor, or modify any other field incrementally.
@@ -83,7 +102,10 @@ When analyzing job fit, project evidence and demonstrated output can and should 
 - **User asks "find me jobs" or similar**: Call `search_jobs`, then use the result with web search.
 - **User pastes a job description**: Call `analyze_fit` to gather data, then provide your analysis.
 - **User says they applied somewhere**: Call `log_application` to track it.
-- **User asks "what have I applied to"**: Call `get_applications`.
+- **User asks "what have I applied to"**: Call `get_applications`. Use `status` filter if they ask about specific statuses.
+- **User gets a response or update**: Call `update_application` with the new status.
+- **User asks about follow-ups**: Call `get_follow_ups` to show what needs attention.
+- **User wants to understand patterns**: Call `get_application_patterns` (needs 10+ applications).
 - **Scouting jobs**: Always use `save_scouted_job` to save listings. NEVER write to scouted_jobs.json directly.
 - **Ranking jobs**: Call `get_scouted_jobs` with `unranked_only: true`, rank them, then call `mark_jobs_ranked`.
 
