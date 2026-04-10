@@ -67,7 +67,7 @@ def send_email(subject, body):
         msg["From"] = user
         msg["To"] = EMAIL_TO
         msg["Subject"] = subject
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as s:
             s.login(user, pw)
             s.sendmail(user, EMAIL_TO, msg.as_string())
         print(f"Email sent to {EMAIL_TO}")
