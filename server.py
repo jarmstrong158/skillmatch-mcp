@@ -1146,9 +1146,21 @@ def _read_scouted_jobs():
         return []
 
 
+SCOUTED_CAP = 50
+
+
 def _write_scouted_jobs(jobs):
-    """Write scouted jobs list to scouted_jobs.json."""
+    """Write scouted jobs list to scouted_jobs.json. Trims oldest ranked jobs beyond cap."""
     ensure_data_dir()
+    if len(jobs) > SCOUTED_CAP:
+        # Keep all unranked, trim oldest ranked to stay under cap
+        unranked = [j for j in jobs if not j.get("ranked", False)]
+        ranked = [j for j in jobs if j.get("ranked", False)]
+        keep = SCOUTED_CAP - len(unranked)
+        if keep > 0:
+            jobs = unranked + ranked[-keep:]  # keep most recent ranked
+        else:
+            jobs = unranked[-SCOUTED_CAP:]  # shouldn't happen but safety
     with open(SCOUTED_PATH, "w", encoding="utf-8") as f:
         json.dump(jobs, f, indent=2)
 

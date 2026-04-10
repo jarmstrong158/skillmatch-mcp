@@ -1,42 +1,59 @@
 """
-Conductor worker: Reads ranked_jobs.md and emails it to Jonathan.
-Skips sending if the file hasn't been updated since last email.
+Conductor worker: Reads scouted_jobs.json, emails only NEW (unranked) listings.
+Caps email at top 15. Marks emailed jobs as ranked after sending.
 """
 import os
 import smtplib
 import json
 from email.mime.text import MIMEText
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 
 DATA_DIR = Path(r"C:\Users\jarms\repos\skillmatch-mcp\data")
+SCOUTED_FILE = DATA_DIR / "scouted_jobs.json"
 RANKED_FILE = DATA_DIR / "ranked_jobs.md"
-LAST_EMAIL_FILE = DATA_DIR / "last_email_timestamp.txt"
 EMAIL_TO = "jarmstrong158@gmail.com"
+EMAIL_CAP = 15
 
 
-def should_send():
-    """Only send if ranked_jobs.md has been modified since last email."""
-    if not RANKED_FILE.exists():
-        print("No ranked_jobs.md found. Skipping.")
-        return False
+def load_scouted():
+    if not SCOUTED_FILE.exists():
+        return []
+    try:
+        with open(SCOUTED_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (json.JSONDecodeError, Exception):
+        return []
 
-    mod_time = RANKED_FILE.stat().st_mtime
 
-    if LAST_EMAIL_FILE.exists():
-        last_sent = float(LAST_EMAIL_FILE.read_text().strip())
-        if mod_time <= last_sent:
-            print("ranked_jobs.md unchanged since last email. Skipping.")
-            return False
+def save_scouted(jobs):
+    with open(SCOUTED_FILE, "w", encoding="utf-8") as f:
+        json.dump(jobs, f, indent=2)
 
-    return True
+
+def format_job(job, idx):
+    lines = [f"{idx}. {job.get('role', 'Unknown')} @ {job.get('company', 'Unknown')}"]
+    if job.get("salary"):
+        lines.append(f"   Salary: {job['salary']}")
+    loc = job.get("location", "")
+    remote = job.get("remote", False)
+    if remote:
+        lines.append(f"   Location: Remote{f' ({loc})' if loc else ''}")
+    elif loc:
+        lines.append(f"   Location: {loc}")
+    if job.get("url"):
+        lines.append(f"   Link: {job['url']}")
+    if job.get("source"):
+        lines.append(f"   Source: {job['source']}")
+    return "\n".join(lines)
 
 
 def send_email(subject, body):
     user = os.environ.get("GMAIL_USER", "")
     pw = os.environ.get("GMAIL_APP_PASSWORD", "")
     if not user or not pw:
-        print("Email skipped — credentials not configured")
+        print("Email skipped -- credentials not configured")
         return False
     try:
         msg = MIMEText(body, "plain")
@@ -54,17 +71,40 @@ def send_email(subject, body):
 
 
 if __name__ == "__main__":
-    if not should_send():
+    jobs = load_scouted()
+    new_jobs = [j for j in jobs if not j.get("ranked", False)]
+
+    if not new_jobs:
+        print("No new (unranked) jobs to email. Skipping.")
         exit(0)
 
-    body = RANKED_FILE.read_text(encoding="utf-8")
-    today = datetime.now().strftime("%m/%d/%Y")
-    subject = f"Job Scout Rankings — {today}"
+    # Cap at EMAIL_CAP most recent
+    to_email = new_jobs[:EMAIL_CAP]
 
+    # Format email body
+    today = datetime.now().strftime("%m/%d/%Y")
+    body_lines = [f"New Job Listings - {today}", f"{len(to_email)} new listings\n"]
+    for i, job in enumerate(to_email, 1):
+        body_lines.append(format_job(job, i))
+        body_lines.append("")
+
+    if len(new_jobs) > EMAIL_CAP:
+        body_lines.append(f"({len(new_jobs) - EMAIL_CAP} more new listings not shown)")
+
+    body = "\n".join(body_lines)
+
+    # Also save to ranked_jobs.md for reference
+    with open(RANKED_FILE, "w", encoding="utf-8") as f:
+        f.write(body)
+
+    subject = f"Job Scout: {len(to_email)} New Listings - {today}"
     if send_email(subject, body):
-        # Record timestamp so we don't re-send the same report
-        LAST_EMAIL_FILE.write_text(str(RANKED_FILE.stat().st_mtime))
-        print("Done.")
+        # Mark emailed jobs as ranked
+        for j in jobs:
+            if not j.get("ranked", False):
+                j["ranked"] = True
+        save_scouted(jobs)
+        print(f"Done. Emailed {len(to_email)}, marked {len(new_jobs)} as ranked.")
     else:
         print("Failed to send email.")
         exit(1)
