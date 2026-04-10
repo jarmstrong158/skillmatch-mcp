@@ -1,52 +1,59 @@
 """
-Conductor worker: Reads scouted_jobs.json, emails only NEW (unranked) listings.
-Caps email at top 15. Marks emailed jobs as ranked after sending.
+Conductor worker: Reads ranked_jobs.md (written by the scheduled ranker task)
+and emails it. Only sends if the file has been updated since the last email.
+Caps the email body at the top 15 ranked entries.
 """
 import os
+import re
 import smtplib
-import json
 from email.mime.text import MIMEText
 from pathlib import Path
 from datetime import datetime
 
 DATA_DIR = Path(r"C:\Users\jarms\repos\skillmatch-mcp\data")
-SCOUTED_FILE = DATA_DIR / "scouted_jobs.json"
 RANKED_FILE = DATA_DIR / "ranked_jobs.md"
+LAST_EMAIL_FILE = DATA_DIR / "last_email_timestamp.txt"
 EMAIL_TO = "jarmstrong158@gmail.com"
 EMAIL_CAP = 15
 
 
-def load_scouted():
-    if not SCOUTED_FILE.exists():
-        return []
-    try:
-        with open(SCOUTED_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, Exception):
-        return []
+def should_send():
+    """Only send if ranked_jobs.md has been modified since last email."""
+    if not RANKED_FILE.exists():
+        print("No ranked_jobs.md found. Skipping.")
+        return False
+
+    mod_time = RANKED_FILE.stat().st_mtime
+
+    if LAST_EMAIL_FILE.exists():
+        last_sent = float(LAST_EMAIL_FILE.read_text().strip())
+        if mod_time <= last_sent:
+            print("ranked_jobs.md unchanged since last email. Skipping.")
+            return False
+
+    return True
 
 
-def save_scouted(jobs):
-    with open(SCOUTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(jobs, f, indent=2)
+def cap_ranked_content(body, cap=EMAIL_CAP):
+    """Trim ranked_jobs.md content to only the top N entries.
+    Entries are separated by numbered headers like '1.', '2.', etc."""
+    # Split on lines that start with a number followed by a period
+    entries = re.split(r'\n(?=\d+\.\s)', body)
 
+    if len(entries) <= 1:
+        # No numbered entries found, or just one block — send as-is
+        return body
 
-def format_job(job, idx):
-    lines = [f"{idx}. {job.get('role', 'Unknown')} @ {job.get('company', 'Unknown')}"]
-    if job.get("salary"):
-        lines.append(f"   Salary: {job['salary']}")
-    loc = job.get("location", "")
-    remote = job.get("remote", False)
-    if remote:
-        lines.append(f"   Location: Remote{f' ({loc})' if loc else ''}")
-    elif loc:
-        lines.append(f"   Location: {loc}")
-    if job.get("url"):
-        lines.append(f"   Link: {job['url']}")
-    if job.get("source"):
-        lines.append(f"   Source: {job['source']}")
-    return "\n".join(lines)
+    # First chunk is the header/preamble before entry 1
+    header = entries[0]
+    ranked_entries = entries[1:]
+
+    if len(ranked_entries) <= cap:
+        return body
+
+    capped = header + "\n".join(ranked_entries[:cap])
+    capped += f"\n\n({len(ranked_entries) - cap} more ranked listings not shown in email)"
+    return capped
 
 
 def send_email(subject, body):
@@ -71,40 +78,18 @@ def send_email(subject, body):
 
 
 if __name__ == "__main__":
-    jobs = load_scouted()
-    new_jobs = [j for j in jobs if not j.get("ranked", False)]
-
-    if not new_jobs:
-        print("No new (unranked) jobs to email. Skipping.")
+    if not should_send():
         exit(0)
 
-    # Cap at EMAIL_CAP most recent
-    to_email = new_jobs[:EMAIL_CAP]
+    body = RANKED_FILE.read_text(encoding="utf-8")
+    body = cap_ranked_content(body, EMAIL_CAP)
 
-    # Format email body
     today = datetime.now().strftime("%m/%d/%Y")
-    body_lines = [f"New Job Listings - {today}", f"{len(to_email)} new listings\n"]
-    for i, job in enumerate(to_email, 1):
-        body_lines.append(format_job(job, i))
-        body_lines.append("")
+    subject = f"Job Scout Rankings -- {today}"
 
-    if len(new_jobs) > EMAIL_CAP:
-        body_lines.append(f"({len(new_jobs) - EMAIL_CAP} more new listings not shown)")
-
-    body = "\n".join(body_lines)
-
-    # Also save to ranked_jobs.md for reference
-    with open(RANKED_FILE, "w", encoding="utf-8") as f:
-        f.write(body)
-
-    subject = f"Job Scout: {len(to_email)} New Listings - {today}"
     if send_email(subject, body):
-        # Mark emailed jobs as ranked
-        for j in jobs:
-            if not j.get("ranked", False):
-                j["ranked"] = True
-        save_scouted(jobs)
-        print(f"Done. Emailed {len(to_email)}, marked {len(new_jobs)} as ranked.")
+        LAST_EMAIL_FILE.write_text(str(RANKED_FILE.stat().st_mtime))
+        print("Done.")
     else:
         print("Failed to send email.")
         exit(1)
