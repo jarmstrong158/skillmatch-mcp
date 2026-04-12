@@ -9,7 +9,12 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
+import ast
+import base64
+import fnmatch
+from pathlib import Path
 import re
+import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
@@ -160,11 +165,22 @@ TOOLS = [
     {
         "name": "get_portfolio",
         "description": (
-            "Fetch public GitHub repos for the user. Reads github_url from the saved profile, "
-            "hits the GitHub public API, and returns repo name, description, language, topics, "
-            "last updated, and homepage for each repo. Sorted by last updated descending."
+            "Fetch public GitHub repos for the user. Returns repo name, description, language, "
+            "topics, last updated, homepage, and README content for each repo. "
+            "Pass deep=true to also run a Haiku-powered analysis of each README, extracting "
+            "stack, what it does, complexity, and notable achievements. Omit deep (or pass false) "
+            "for the free metadata+README fetch. Only use deep=true when you explicitly need "
+            "structured analysis and the user has authorized API spend."
         ),
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "deep": {
+                    "type": "boolean",
+                    "description": "If true, runs Haiku analysis on each README. Costs API tokens. Default false.",
+                }
+            },
+        },
     },
     {
         "name": "get_resume",
@@ -430,6 +446,49 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "read_repo",
+        "description": (
+            "Analyzes a local code repository and extracts structural information: "
+            "detected languages, tech stack (frameworks/libraries from imports), "
+            "entry points, key modules (classes and functions), and architecture shape. "
+            "Returns raw structured JSON for Claude to interpret — no API calls, "
+            "pure local analysis using AST for Python files and regex for JS/TS. "
+            "Use this to understand a candidate's project before analyzing job fit, "
+            "or to supplement get_portfolio with deeper technical signal from local repos."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to the local repository root directory.",
+                }
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "purge_dead_listings",
+        "description": (
+            "Checks every scouted job URL for liveness and removes expired or unavailable "
+            "postings from scouted_jobs.json. Detects dead listings via HTTP 404/410 status "
+            "codes and known closure phrases in page content (e.g. 'no longer accepting "
+            "applications'). Connection errors and 5xx responses are treated as 'keep' to "
+            "avoid false positives. Pass dry_run=true to preview what would be removed "
+            "without actually deleting anything."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, check URLs but do not modify scouted_jobs.json. Defaults to false.",
+                }
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -478,9 +537,10 @@ def read_resume_file(path):
     return None, f"Unsupported file type: {ext}. Supported: .txt, .md, .docx"
 
 
-def fetch_github_repos(username):
+def fetch_github_repos(username, deep=False):
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "SkillMatch-MCP"}
     url = f"https://api.github.com/users/{username}/repos?per_page=100&sort=updated&direction=desc"
-    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github.v3+json", "User-Agent": "SkillMatch-MCP"})
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -493,14 +553,61 @@ def fetch_github_repos(username):
     for r in data:
         if r.get("fork"):
             continue
-        repos.append({
+        repo = {
             "name": r.get("name"),
             "description": r.get("description"),
             "language": r.get("language"),
             "topics": r.get("topics", []),
             "last_updated": r.get("updated_at"),
             "homepage": r.get("homepage"),
-        })
+            "readme": None,
+        }
+        # Fetch README content from GitHub
+        try:
+            readme_url = f"https://api.github.com/repos/{username}/{r['name']}/readme"
+            readme_req = urllib.request.Request(readme_url, headers=headers)
+            with urllib.request.urlopen(readme_req, timeout=8) as readme_resp:
+                readme_data = json.loads(readme_resp.read().decode("utf-8"))
+                content_b64 = readme_data.get("content", "")
+                readme_text = base64.b64decode(content_b64).decode("utf-8", errors="ignore")
+                repo["readme"] = readme_text[:4000]
+        except Exception:
+            pass
+        repos.append(repo)
+
+    # Use Haiku to extract structured technical summaries from READMEs (opt-in only)
+    repos_with_readmes = [r for r in repos if r["readme"]]
+    if deep and repos_with_readmes and ANTHROPIC_API_KEY:
+        readme_block = "\n\n---\n\n".join(
+            f"REPO: {r['name']}\nREADME:\n{r['readme']}" for r in repos_with_readmes
+        )
+        prompt = (
+            "For each repo below, extract a JSON object with these fields:\n"
+            '  "name": repo name (exact),\n'
+            '  "stack": list of specific technologies/frameworks/libraries used,\n'
+            '  "what_it_does": one clear sentence describing what the project does,\n'
+            '  "complexity": "simple" | "medium" | "complex",\n'
+            '  "notable": any standout technical achievement worth highlighting in a job application (string or null)\n\n'
+            "Return ONLY a JSON array of these objects, no preamble, no markdown.\n\n"
+            + readme_block
+        )
+        summary_text, err = _call_claude(prompt, max_tokens=2000)
+        if summary_text and not err:
+            try:
+                # strip markdown fences if present
+                clean = summary_text.strip()
+                if clean.startswith("```"):
+                    clean = clean.split("```")[1]
+                    if clean.startswith("json"):
+                        clean = clean[4:]
+                summaries = json.loads(clean.strip())
+                summary_map = {s["name"]: s for s in summaries if isinstance(s, dict)}
+                for repo in repos:
+                    if repo["name"] in summary_map:
+                        repo["analysis"] = summary_map[repo["name"]]
+            except Exception:
+                pass  # Haiku parse failed — raw readme still returned
+
     return repos, None
 
 
@@ -708,7 +815,7 @@ def handle_get_profile(_params):
     return profile
 
 
-def handle_get_portfolio(_params):
+def handle_get_portfolio(params):
     profile = read_profile()
     if profile is None:
         return {"error": "No profile found. Run setup first."}
@@ -717,12 +824,16 @@ def handle_get_portfolio(_params):
     if not github_url:
         return {"error": "No github_url in profile. Run setup again to add it."}
 
+    deep = params.get("deep", False)
     username = extract_github_username(github_url)
-    repos, err = fetch_github_repos(username)
+    repos, err = fetch_github_repos(username, deep=deep)
     if err:
         return {"error": err}
 
-    return {"username": username, "repo_count": len(repos), "repos": repos}
+    result = {"username": username, "repo_count": len(repos), "repos": repos}
+    if not deep:
+        result["hint"] = "README content is included for each repo. Pass deep=true to also run Haiku-powered structured analysis (stack, complexity, notable achievements) — costs API tokens, use only when requested."
+    return result
 
 
 def handle_get_resume(_params):
@@ -1313,6 +1424,433 @@ def handle_update_profile(params):
     return {"success": True, "updated_fields": updated, "profile": profile}
 
 
+# --- Repo Analysis Helpers ---
+
+_ALWAYS_IGNORE_DIRS = {
+    ".git", "node_modules", "__pycache__", ".venv", "venv",
+    ".env", "dist", "build", ".tox", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache", ".eggs",
+}
+
+_EXT_LANG = {
+    ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
+    ".tsx": "TypeScript", ".jsx": "JavaScript", ".go": "Go",
+    ".rs": "Rust", ".java": "Java", ".rb": "Ruby", ".php": "PHP",
+    ".cs": "C#", ".cpp": "C++", ".c": "C", ".swift": "Swift",
+    ".kt": "Kotlin", ".sh": "Shell", ".bash": "Shell",
+    ".html": "HTML", ".css": "CSS", ".scss": "CSS",
+    ".sql": "SQL", ".r": "R", ".lua": "Lua", ".dart": "Dart",
+    ".ex": "Elixir", ".exs": "Elixir",
+}
+
+_PYTHON_STACK = {
+    "fastapi": "FastAPI", "flask": "Flask", "django": "Django",
+    "starlette": "Starlette", "tornado": "Tornado", "aiohttp": "aiohttp",
+    "sanic": "Sanic", "uvicorn": "uvicorn", "gunicorn": "gunicorn",
+    "sqlalchemy": "SQLAlchemy", "alembic": "Alembic",
+    "pydantic": "Pydantic", "celery": "Celery", "redis": "Redis",
+    "boto3": "AWS SDK", "botocore": "AWS SDK",
+    "pandas": "pandas", "numpy": "numpy", "scipy": "scipy",
+    "sklearn": "scikit-learn", "tensorflow": "TensorFlow",
+    "torch": "PyTorch", "keras": "Keras",
+    "transformers": "HuggingFace", "langchain": "LangChain",
+    "anthropic": "Anthropic SDK", "openai": "OpenAI SDK",
+    "pytest": "pytest", "click": "Click", "typer": "Typer",
+    "httpx": "httpx", "requests": "requests",
+    "asyncpg": "asyncpg", "psycopg": "psycopg", "pymongo": "pymongo",
+    "motor": "Motor", "elasticsearch": "Elasticsearch",
+    "streamlit": "Streamlit", "gradio": "Gradio", "mcp": "MCP",
+}
+
+_JS_STACK = {
+    "react": "React", "vue": "Vue", "angular": "Angular",
+    "svelte": "Svelte", "next": "Next.js", "nuxt": "Nuxt",
+    "express": "Express", "fastify": "Fastify", "koa": "Koa",
+    "@nestjs/core": "NestJS", "prisma": "Prisma",
+    "mongoose": "Mongoose", "sequelize": "Sequelize",
+    "redux": "Redux", "zustand": "Zustand", "mobx": "MobX",
+    "tailwindcss": "Tailwind CSS", "@mui/material": "Material UI",
+    "axios": "axios", "graphql": "GraphQL",
+    "@apollo/client": "Apollo", "jest": "Jest",
+    "vitest": "Vitest", "cypress": "Cypress",
+    "vite": "Vite", "webpack": "webpack", "rollup": "Rollup",
+    "electron": "Electron", "socket.io": "Socket.io",
+    "openai": "OpenAI SDK", "@anthropic-ai/sdk": "Anthropic SDK",
+}
+
+_NOISY_PY_IMPORTS = {
+    "os", "sys", "re", "json", "typing", "pathlib", "collections",
+    "itertools", "functools", "abc", "copy", "math", "time",
+    "datetime", "io", "enum", "dataclasses", "contextlib",
+    "logging", "traceback", "threading", "subprocess",
+}
+
+_ENTRY_NAMES = {
+    "main.py", "app.py", "server.py", "run.py", "manage.py",
+    "wsgi.py", "asgi.py", "cli.py", "start.py", "__main__.py",
+    "index.js", "index.ts", "app.js", "app.ts", "server.js",
+    "server.ts", "main.js", "main.ts", "index.jsx", "index.tsx",
+    "main.go", "main.rs", "main.rb", "program.cs",
+}
+
+
+def _repo_attr_chain(node):
+    if isinstance(node, ast.Attribute):
+        return f"{_repo_attr_chain(node.value)}.{node.attr}"
+    elif isinstance(node, ast.Name):
+        return node.id
+    return "?"
+
+
+def _py_imports(source):
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    names = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.append(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.append(node.module.split(".")[0])
+    return names
+
+
+def _py_module_info(source, rel_path):
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    classes = []
+    functions = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, ast.ClassDef):
+            classes.append(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            decorators = []
+            for d in node.decorator_list:
+                if isinstance(d, ast.Name):
+                    decorators.append(d.id)
+                elif isinstance(d, ast.Attribute):
+                    decorators.append(_repo_attr_chain(d))
+            functions.append({"name": node.name, "decorators": decorators})
+    return {"path": rel_path, "classes": classes, "functions": functions}
+
+
+def _js_imports(source):
+    patterns = [
+        r'from\s+["\']([^"\'./][^"\']*)["\']',
+        r'require\s*\(\s*["\']([^"\'./][^"\']*)["\']',
+        r'import\s+["\']([^"\'./][^"\']*)["\']',
+    ]
+    names = []
+    for pat in patterns:
+        names.extend(re.findall(pat, source))
+    return names
+
+
+def _load_gitignore(root):
+    gitignore_path = root / ".gitignore"
+    patterns = []
+    if gitignore_path.is_file():
+        for line in gitignore_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                patterns.append(line)
+    return patterns
+
+
+def _is_ignored(rel_parts, is_dir, gitignore_patterns):
+    name = rel_parts[-1] if rel_parts else ""
+    if is_dir:
+        if name in _ALWAYS_IGNORE_DIRS:
+            return True
+        if name.endswith((".egg-info", ".dist-info")):
+            return True
+    rel_str = "/".join(rel_parts)
+    for pat in gitignore_patterns:
+        if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel_str, pat):
+            return True
+    return False
+
+
+def _walk_repo(root, gitignore_patterns, max_files=200, max_depth=8):
+    all_files = []
+
+    def _recurse(cur, rel_parts, depth):
+        if depth > max_depth or len(all_files) >= max_files:
+            return
+        try:
+            entries = sorted(cur.iterdir(), key=lambda e: (e.is_file(), e.name))
+        except PermissionError:
+            return
+        for entry in entries:
+            if len(all_files) >= max_files:
+                break
+            rel = rel_parts + [entry.name]
+            if entry.is_dir():
+                if not _is_ignored(rel, True, gitignore_patterns):
+                    _recurse(entry, rel, depth + 1)
+            elif entry.is_file():
+                if not _is_ignored(rel, False, gitignore_patterns):
+                    all_files.append("/".join(rel))
+
+    _recurse(root, [], 0)
+    return all_files
+
+
+def _detect_stack(all_files, root):
+    stack_found = set()
+    modules = []
+    max_modules = 30
+    max_bytes = 100_000
+
+    for rel_path in all_files:
+        ext = os.path.splitext(rel_path)[1].lower()
+        is_py = ext == ".py"
+        is_js = ext in (".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs")
+        if not (is_py or is_js):
+            continue
+        abs_path = root / rel_path
+        try:
+            if abs_path.stat().st_size > max_bytes:
+                continue
+            source = abs_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+
+        if is_py:
+            raw = _py_imports(source)
+            for name in raw:
+                hint = _PYTHON_STACK.get(name.lower())
+                if hint:
+                    stack_found.add(hint)
+            if len(modules) < max_modules:
+                info = _py_module_info(source, rel_path)
+                if info and (info["classes"] or info["functions"]):
+                    clean_imports = [i for i in raw if i not in _NOISY_PY_IMPORTS][:20]
+                    modules.append({
+                        "path": info["path"],
+                        "classes": info["classes"],
+                        "functions": [f["name"] for f in info["functions"]],
+                        "decorated_functions": [
+                            {"name": f["name"], "decorators": f["decorators"]}
+                            for f in info["functions"] if f["decorators"]
+                        ],
+                        "imports": clean_imports,
+                    })
+        elif is_js:
+            raw = _js_imports(source)
+            for imp in raw:
+                # check full package name first, then root segment
+                hint = _JS_STACK.get(imp.lower())
+                if not hint:
+                    root_seg = imp.lower().lstrip("@").split("/")[0]
+                    for k, v in _JS_STACK.items():
+                        if k.lstrip("@").split("/")[0] == root_seg:
+                            hint = v
+                            break
+                if hint:
+                    stack_found.add(hint)
+
+    return sorted(stack_found), modules
+
+
+def _detect_shape(all_files, stack, entry_points):
+    file_set = set(all_files)
+    top_dirs = {f.split("/")[0] for f in all_files if "/" in f}
+
+    if {"services", "microservices", "apps", "packages"} & top_dirs:
+        return "monorepo / microservices"
+
+    has_setup = any(f in file_set for f in ("setup.py", "setup.cfg", "pyproject.toml"))
+    has_init = any(f == "__init__.py" or f.endswith("/__init__.py") for f in file_set)
+    if has_setup and has_init and not entry_points:
+        return "library / package"
+
+    if any(os.path.basename(f) in ("cli.py", "__main__.py") for f in file_set):
+        web_frameworks = {"FastAPI", "Flask", "Django", "Express", "Fastify", "Koa", "NestJS", "Next.js", "Nuxt"}
+        if not (web_frameworks & set(stack)):
+            return "CLI tool"
+
+    web_frameworks = {"FastAPI", "Flask", "Django", "Express", "Fastify", "Koa", "NestJS", "Next.js", "Nuxt", "Starlette"}
+    if web_frameworks & set(stack):
+        return "web application / API server"
+
+    ds_libs = {"pandas", "numpy", "scikit-learn", "TensorFlow", "PyTorch", "HuggingFace"}
+    nb_files = [f for f in file_set if f.endswith(".ipynb")]
+    if nb_files or (ds_libs & set(stack)):
+        return "data science / ML project"
+
+    return "monolith / general application"
+
+
+def _build_file_tree(all_files):
+    """Condensed directory structure: top 2 levels with file counts."""
+    root_files = []
+    dirs = {}
+    for f in all_files:
+        parts = f.split("/", 1)
+        if len(parts) == 1:
+            root_files.append(parts[0])
+        else:
+            top = parts[0]
+            dirs.setdefault(top, []).append(parts[1])
+
+    tree = {}
+    if root_files:
+        tree["(root)"] = root_files
+    for top, files in sorted(dirs.items()):
+        sub = {}
+        for fp in files:
+            parts2 = fp.split("/", 1)
+            if len(parts2) == 1:
+                sub.setdefault("_files", []).append(parts2[0])
+            else:
+                sub[parts2[0]] = sub.get(parts2[0], 0) + 1
+        tree[top] = sub
+    return tree
+
+
+def handle_read_repo(params):
+    repo_path = params.get("path", "").strip()
+    if not repo_path:
+        return {"error": "path is required"}
+    root = Path(repo_path)
+    if not root.is_dir():
+        return {"error": f"Directory not found: {repo_path}"}
+
+    gitignore_patterns = _load_gitignore(root)
+    all_files = _walk_repo(root, gitignore_patterns)
+
+    lang_counts = {}
+    for f in all_files:
+        ext = os.path.splitext(f)[1].lower()
+        lang = _EXT_LANG.get(ext)
+        if lang:
+            lang_counts[lang] = lang_counts.get(lang, 0) + 1
+
+    entry_points = [f for f in all_files if os.path.basename(f).lower() in _ENTRY_NAMES]
+    stack, modules = _detect_stack(all_files, root)
+    architecture_shape = _detect_shape(all_files, stack, entry_points)
+    file_tree = _build_file_tree(all_files)
+
+    return {
+        "repo_name": root.name,
+        "repo_path": str(root),
+        "truncated": len(all_files) >= 200,
+        "files_analyzed": len(all_files),
+        "languages": lang_counts,
+        "stack": stack,
+        "entry_points": entry_points,
+        "architecture_shape": architecture_shape,
+        "modules": modules,
+        "file_tree": file_tree,
+    }
+
+
+# --- Dead listing detection ---
+
+def _check_url_alive(url, timeout=8):
+    """Platform-aware liveness check. Returns (alive: bool, reason: str).
+    Errs on the side of keeping on any ambiguous error (connection issues, 5xx)."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; jobcheck/1.0)"}
+
+    def _get_status(check_url):
+        req = urllib.request.Request(check_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+
+    try:
+        # Greenhouse: use the public boards JSON API.
+        # Handles job-boards.greenhouse.io, boards.greenhouse.io, job-boards.eu.greenhouse.io
+        gh = re.search(r"greenhouse\.io/([^/?#]+)/jobs/(\d+)", url)
+        if gh:
+            company, job_id = gh.group(1), gh.group(2)
+            api_url = f"https://boards-api.greenhouse.io/v1/boards/{company}/jobs/{job_id}"
+            try:
+                req = urllib.request.Request(api_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                # live=False or status != "live" means closed
+                if body.get("live") is False or body.get("status", "live") != "live":
+                    return False, f"Greenhouse closed (live={body.get('live')}, status={body.get('status')})"
+                return True, f"Greenhouse live"
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return False, "Greenhouse API 404"
+                return True, f"Greenhouse API {e.code} (keeping)"
+
+        # Ashby: use the /api/posting/{uuid} endpoint (no auth required, 404 on closed).
+        ashby = re.search(r"ashbyhq\.com/[^/?#]+/([0-9a-f-]{36})", url, re.IGNORECASE)
+        if ashby:
+            job_uuid = ashby.group(1)
+            api_url = f"https://jobs.ashbyhq.com/api/posting/{job_uuid}"
+            try:
+                status = _get_status(api_url)
+                return True, f"Ashby API {status}"
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    return False, "Ashby API 404"
+                return True, f"Ashby API {e.code} (keeping)"
+
+        # Lever and everything else: direct GET, 404/410 = dead.
+        try:
+            status = _get_status(url)
+            return True, f"HTTP {status}"
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410):
+                return False, f"HTTP {e.code}"
+            return True, f"HTTP {e.code} (keeping)"
+
+    except urllib.error.URLError:
+        return True, "connection error (keeping)"
+    except Exception as e:
+        return True, f"error: {e} (keeping)"
+
+
+def handle_purge_dead_listings(params):
+    dry_run = params.get("dry_run", False)
+    jobs = _read_scouted_jobs()
+    if not jobs:
+        return {"removed_count": 0, "kept_count": 0, "removed": [], "message": "No scouted jobs found."}
+
+    removed = []
+    kept = []
+
+    for job in jobs:
+        url = job.get("url", "")
+        alive, reason = _check_url_alive(url)
+        if alive:
+            kept.append(job)
+        else:
+            removed.append({
+                "company": job["company"],
+                "role": job["role"],
+                "url": url,
+                "reason": reason,
+            })
+        time.sleep(0.3)
+
+    if not dry_run and removed:
+        _write_scouted_jobs(kept)
+
+    return {
+        "dry_run": dry_run,
+        "total_checked": len(jobs),
+        "removed_count": len(removed),
+        "kept_count": len(kept),
+        "removed": removed,
+        "message": (
+            f"Removed {len(removed)} dead listings, kept {len(kept)}."
+            if not dry_run
+            else f"Dry run: would remove {len(removed)}, keep {len(kept)}."
+        ),
+    }
+
+
 HANDLERS = {
     "setup": handle_setup,
     "get_profile": handle_get_profile,
@@ -1332,6 +1870,8 @@ HANDLERS = {
     "get_application_patterns": handle_get_application_patterns,
     "add_resume": handle_add_resume,
     "list_resumes": handle_list_resumes,
+    "read_repo": handle_read_repo,
+    "purge_dead_listings": handle_purge_dead_listings,
 }
 
 
