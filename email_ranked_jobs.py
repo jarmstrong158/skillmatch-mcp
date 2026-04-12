@@ -2,7 +2,6 @@
 Conductor worker: Reads ranked_jobs.md (written by the scheduled ranker task)
 and emails it. Caps the email body at the top 15 ranked entries.
 """
-import os
 import re
 import smtplib
 from email.mime.text import MIMEText
@@ -11,9 +10,13 @@ from datetime import datetime
 
 DATA_DIR = Path(r"C:\Users\jarms\repos\skillmatch-mcp\data")
 RANKED_FILE = DATA_DIR / "ranked_jobs.md"
-GMAIL_USER = os.environ["GMAIL_USER"]
-GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
-EMAIL_TO = os.environ.get("EMAIL_TO", GMAIL_USER)
+
+# Hardcode these directly — env vars are unreliable depending on how the
+# worker process is launched (e.g. via Conductor on Windows).
+# See README: Email Worker Setup.
+GMAIL_USER = "you@gmail.com"
+GMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"
+EMAIL_TO = "you@gmail.com"
 EMAIL_CAP = 15
 
 

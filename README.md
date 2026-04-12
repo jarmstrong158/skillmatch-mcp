@@ -125,6 +125,8 @@ These can be set during initial setup or added later with the `update_profile` t
 
 **get_application_patterns** analyzes your full application history (10+ needed) to find which role types get responses, which skills resonate, and recommends search adjustments.
 
+**email_ranked_jobs.py** is a standalone Conductor worker script that emails the latest ranked job report. See [Email Worker Setup](#email-worker-setup) below for configuration.
+
 **save_scouted_job** saves a job listing found during scouting. It validates the URL to reject search result pages and deduplicates against existing scouted jobs and applications.
 
 **get_scouted_jobs** returns all scouted listings, optionally filtered to only unranked ones. **mark_jobs_ranked** marks all unranked jobs as ranked after a ranking report is generated.
@@ -149,6 +151,22 @@ Claude: Paste your resume or provide a file path.
 You: [paste resume text here]
 Claude: Profile saved. Let me search for jobs.
 ```
+
+## Email Worker Setup
+
+`email_ranked_jobs.py` sends the ranked job report via Gmail. It is designed to run as a [Conductor](https://github.com/jarmstrong158/conductor-mcp) worker on a schedule.
+
+**Gmail credentials must be hardcoded directly in the file.** Environment variables are not reliable here — depending on how the worker process is launched, env vars may not be inherited, causing silent failures. Open `email_ranked_jobs.py` and set these three lines at the top:
+
+```python
+GMAIL_USER = "you@gmail.com"
+GMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"  # Gmail App Password, not your account password
+EMAIL_TO = "you@gmail.com"
+```
+
+To generate a Gmail App Password: Google Account → Security → 2-Step Verification → App Passwords. Create one for "Mail".
+
+The script reads `data/ranked_jobs.md`, caps the email to the top 15 ranked listings, sends it, and then **deletes** `ranked_jobs.md` so stale rankings are not recycled on the next run.
 
 ## File Structure
 
