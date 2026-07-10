@@ -1,3 +1,212 @@
 {
-  "items": []
+  "items": [
+    {
+      "id": "k-010b5f2a",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Two-step fit analysis: parse JD first via Claude API, then bundle with portfolio/resume",
+      "why": "",
+      "tags": [
+        "architecture",
+        "analyze-fit",
+        "claude-api",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-001"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 9,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    },
+    {
+      "id": "k-f4fa4fda",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Scouted jobs list capped at 50, email capped at top 15 new listings",
+      "why": "",
+      "tags": [
+        "email",
+        "scouted-jobs",
+        "pipeline",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-002"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 9,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    },
+    {
+      "id": "k-37f6adc4",
+      "type": "memory",
+      "kind": "decision",
+      "content": "resume_path is optional when resume_text is provided",
+      "why": "",
+      "tags": [
+        "profile",
+        "portability",
+        "public-mode",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-003"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 6,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    },
+    {
+      "id": "k-2363b195",
+      "type": "memory",
+      "kind": "decision",
+      "content": "Multi-resume variants with auto-selection by role_type from parsed JD",
+      "why": "",
+      "tags": [
+        "resume",
+        "analyze-fit",
+        "multi-resume",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "dec-004"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 9,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    },
+    {
+      "id": "k-9b254d87",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "Never write to scouted_jobs.json directly \u2014 always use save_scouted_job tool",
+      "why": "save_scouted_job validates URLs (rejects search result pages), deduplicates against existing scouted jobs and applications DB, and enforces the 50-entry cap.",
+      "tags": [
+        "scouted-jobs",
+        "data-integrity",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-001"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 12,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    },
+    {
+      "id": "k-7939e5b4",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "Email worker reads ranked_jobs.md, not scouted_jobs.json \u2014 never bypass the ranking step",
+      "why": "The ranker task scores and orders jobs. Previous bug: email worker was rewritten to read scouted_jobs.json directly, which sent unranked listings and broke the pipeline.",
+      "tags": [
+        "email",
+        "pipeline",
+        "ranking",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-002"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 12,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    },
+    {
+      "id": "k-22275a17",
+      "type": "memory",
+      "kind": "constraint",
+      "content": "parse_jd and get_application_patterns require ANTHROPIC_API_KEY env var",
+      "why": "These tools call the Claude API directly. Without the key they return graceful errors but produce no output.",
+      "tags": [
+        "claude-api",
+        "configuration",
+        "context-keeper"
+      ],
+      "scope": "team",
+      "project": "skillmatch-mcp",
+      "source": {
+        "system": "context-keeper",
+        "ref": "con-003"
+      },
+      "created_by": "jonny-desktop",
+      "created_at": "2026-07-10T18:03:23.669551+00:00",
+      "updated_at": "2026-07-10T18:04:09.841614+00:00",
+      "status": "active",
+      "trust": {
+        "recalls": 12,
+        "endorsements": [],
+        "projects": [
+          "skillmatch-mcp"
+        ]
+      }
+    }
+  ]
 }
