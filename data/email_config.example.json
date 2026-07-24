@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy this file to email_config.json in the same folder and fill in real values. email_config.json is gitignored and must never be committed. gmail_app_password is a Gmail App Password (Google Account > Security > 2-Step Verification > App Passwords > Mail), NOT your account password. email_to defaults to gmail_user if omitted; email_cap defaults to 15.",
+  "gmail_user": "you@gmail.com",
+  "gmail_app_password": "replace-with-your-gmail-app-password",
+  "email_to": "you@gmail.com",
+  "email_cap": 15
+}

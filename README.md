@@ -156,15 +156,35 @@ Claude: Profile saved. Let me search for jobs.
 
 `email_ranked_jobs.py` sends the ranked job report via Gmail. It is designed to run as a [Conductor](https://github.com/jarmstrong158/conductor-mcp) worker on a schedule.
 
-**Gmail credentials must be hardcoded directly in the file.** Environment variables are not reliable here — depending on how the worker process is launched, env vars may not be inherited, causing silent failures. Open `email_ranked_jobs.py` and set these three lines at the top:
+**Credentials live in a gitignored config file — never in the source.** Copy the template and fill it in:
 
-```python
-GMAIL_USER = "you@gmail.com"
-GMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"  # Gmail App Password, not your account password
-EMAIL_TO = "you@gmail.com"
+```bash
+cp data/email_config.example.json data/email_config.json
 ```
 
-To generate a Gmail App Password: Google Account → Security → 2-Step Verification → App Passwords. Create one for "Mail".
+Then edit `data/email_config.json`:
+
+```json
+{
+  "gmail_user": "you@gmail.com",
+  "gmail_app_password": "your-16-char-app-password",
+  "email_to": "you@gmail.com",
+  "email_cap": 15
+}
+```
+
+| Key | Required | Default |
+|---|---|---|
+| `gmail_user` | yes | — |
+| `gmail_app_password` | yes | — |
+| `email_to` | no | falls back to `gmail_user` |
+| `email_cap` | no | `15` |
+
+The whole `data/` folder is gitignored (only `.gitkeep` and `email_config.example.json` are tracked), so `email_config.json` can never be committed by accident.
+
+**Why a config file and not environment variables?** Depending on how the worker process is launched — notably via Conductor on Windows — environment variables may not be inherited by the child process, causing silent send failures. The config file is read from a path relative to the script, so it works regardless of how the process was spawned. Environment variables (`GMAIL_USER`, `GMAIL_APP_PASSWORD`, `EMAIL_TO`, `EMAIL_CAP`) are still honored as a **fallback** when a key is absent from the config file, which is handy for CI or containerized runs. If neither source supplies credentials, the script exits with code `2` and prints setup instructions instead of failing silently.
+
+To generate a Gmail App Password: Google Account → Security → 2-Step Verification → App Passwords. Create one for "Mail". This is not your normal account password. If you ever paste one into a source file by mistake, revoke it from that same screen.
 
 The script reads `data/ranked_jobs.md`, caps the email to the top 15 ranked listings, sends it, and then **deletes** `ranked_jobs.md` so stale rankings are not recycled on the next run.
 
@@ -179,10 +199,12 @@ skillmatch-mcp/
   email_ranked_jobs.py   # Conductor worker: emails ranked job reports
   cowork_monitor.py      # Conductor worker: monitors Cowork VM, auto-recovers
   cowork_tab.png         # Reference image for Cowork tab UI automation
-  data/
-    .gitkeep             # Keeps the folder in git
-    profile.json         # Created on first setup (gitignored)
-    applications.db      # Created on first log (gitignored)
-    scouted_jobs.json    # Scouted listings (gitignored)
-    ranked_jobs.md       # Latest ranked report (gitignored)
+  data/                  # Entire folder gitignored except the two tracked files below
+    .gitkeep                  # Keeps the folder in git (tracked)
+    email_config.example.json # Credential template (tracked, no real secrets)
+    email_config.json         # Your real Gmail credentials (gitignored)
+    profile.json              # Created on first setup (gitignored)
+    applications.db           # Created on first log (gitignored)
+    scouted_jobs.json         # Scouted listings (gitignored)
+    ranked_jobs.md            # Latest ranked report (gitignored)
 ```

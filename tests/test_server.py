@@ -11,7 +11,7 @@ import sqlite3
 import sys
 import urllib.error
 import urllib.request
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -962,3 +962,61 @@ class TestInitDb:
         assert "follow_up_due_date" in cols
         assert "response_received" in cols
         assert "outcome" in cols
+
+
+# ---------------------------------------------------------------------------
+# tools/call dispatch — isError flag
+# ---------------------------------------------------------------------------
+
+class TestToolCallIsError:
+    """The JSON-RPC dispatcher must set isError whenever the handler result is
+    an error, not just when the tool name is unknown."""
+
+    def _dispatch(self, monkeypatch, capsys, tool_name, handlers=None):
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool_name, "arguments": {}},
+        }
+        if handlers:
+            for name, fn in handlers.items():
+                monkeypatch.setitem(server.HANDLERS, name, fn)
+        monkeypatch.setattr(server, "ensure_data_dir", lambda: None)
+        monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(request) + "\n"))
+        server.main()
+        return json.loads(capsys.readouterr().out.strip())
+
+    def test_success_result_is_not_flagged(self, monkeypatch, capsys):
+        response = self._dispatch(
+            monkeypatch, capsys, "_ok_tool",
+            {"_ok_tool": lambda args: {"status": "ok"}},
+        )
+        assert response["result"]["isError"] is False
+
+    def test_handler_error_dict_is_flagged(self, monkeypatch, capsys):
+        response = self._dispatch(
+            monkeypatch, capsys, "_err_tool",
+            {"_err_tool": lambda args: {"error": "no profile found"}},
+        )
+        assert response["result"]["isError"] is True
+        assert "no profile found" in response["result"]["content"][0]["text"]
+
+    def test_handler_exception_is_flagged(self, monkeypatch, capsys):
+        def boom(args):
+            raise RuntimeError("kaboom")
+
+        response = self._dispatch(monkeypatch, capsys, "_boom_tool", {"_boom_tool": boom})
+        assert response["result"]["isError"] is True
+        assert "kaboom" in response["result"]["content"][0]["text"]
+
+    def test_unknown_tool_is_flagged(self, monkeypatch, capsys):
+        response = self._dispatch(monkeypatch, capsys, "_does_not_exist")
+        assert response["result"]["isError"] is True
+
+    def test_non_dict_result_is_not_flagged(self, monkeypatch, capsys):
+        response = self._dispatch(
+            monkeypatch, capsys, "_list_tool",
+            {"_list_tool": lambda args: ["error", "not really"]},
+        )
+        assert response["result"]["isError"] is False

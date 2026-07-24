@@ -1,10 +1,9 @@
-data/profile.json
-data/applications.db
-data/scouted_jobs.json
-data/ranked_jobs.md
-data/last_email_timestamp.txt
-data/cowork_status.txt
-data/*.png
+# Local data is never committed (profile, applications.db, scouted/ranked jobs,
+# email_config.json with real Gmail credentials, screenshots, etc.).
+# Only the folder placeholder and the credential template are tracked.
+data/*
+!data/.gitkeep
+!data/email_config.example.json
 __pycache__/
 *.pyc
 .mcp.json

@@ -1928,13 +1928,16 @@ def main():
             else:
                 try:
                     result = handler(tool_args)
+                    is_error = isinstance(result, dict) and "error" in result
                 except Exception as e:
                     result = {"error": f"Tool '{tool_name}' failed: {e}"}
+                    is_error = True
                 response = {
                     "jsonrpc": "2.0",
                     "id": msg_id,
                     "result": {
                         "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                        "isError": is_error,
                     },
                 }
         elif method.startswith("notifications/"):
