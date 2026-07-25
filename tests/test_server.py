@@ -1020,3 +1020,61 @@ class TestToolCallIsError:
             {"_list_tool": lambda args: ["error", "not really"]},
         )
         assert response["result"]["isError"] is False
+
+
+# ---------------------------------------------------------------------------
+# link directive
+# ---------------------------------------------------------------------------
+class TestLinkDirective:
+    """Every tool that can surface a job must carry the link instruction.
+
+    A fit analysis the user cannot act on is unfinished work: naming a company
+    without its posting URL sends them searching for a listing this server
+    already holds the direct link to. The directive rides on the returned
+    payload rather than living only in CLAUDE.md, because the payload is what
+    the model is reading at the moment it writes the answer.
+    """
+
+    def _has_directive(self, result):
+        return "url" in result.get("instructions", "").lower()
+
+    def test_scouted_jobs_carries_directive(self, tmp_path, monkeypatch):
+        _patch_paths(tmp_path, monkeypatch)
+        assert self._has_directive(server.handle_get_scouted_jobs({}))
+
+    def test_applications_carries_directive(self, tmp_path, monkeypatch):
+        _patch_paths(tmp_path, monkeypatch)
+        server.handle_log_application({"company": "Acme", "role": "SWE"})
+        assert self._has_directive(server.handle_get_applications({}))
+
+    def test_follow_ups_carries_directive(self, tmp_path, monkeypatch):
+        _patch_paths(tmp_path, monkeypatch)
+        assert self._has_directive(server.handle_get_follow_ups({}))
+
+    def test_search_jobs_carries_directive(self, tmp_path, monkeypatch):
+        _patch_paths(tmp_path, monkeypatch)
+        server.handle_setup({
+            "name": "T", "current_role": "x", "target_roles": ["AI Engineer"],
+            "salary_floor": 100000, "remote_only": True, "location": "PA",
+            "dealbreakers": [], "github_url": "https://github.com/t",
+            "resume_path": str(tmp_path / "r.txt"),
+        })
+        assert self._has_directive(server.handle_search_jobs({"query": "mcp"}))
+
+    def test_jobs_missing_a_url_are_named_not_silent(self, tmp_path, monkeypatch):
+        """A posting with no link must not be presentable as if it were
+        actionable — the caller is told which ones it cannot link."""
+        _patch_paths(tmp_path, monkeypatch)
+        server._write_scouted_jobs([
+            {"company": "HasLink", "role": "A", "url": "https://x.example/1"},
+            {"company": "NoLink", "role": "B"},
+        ])
+        out = server.handle_get_scouted_jobs({})
+        assert out["jobs_without_url"] == ["NoLink - B"]
+
+    def test_no_missing_url_key_when_all_have_links(self, tmp_path, monkeypatch):
+        _patch_paths(tmp_path, monkeypatch)
+        server._write_scouted_jobs([
+            {"company": "HasLink", "role": "A", "url": "https://x.example/1"},
+        ])
+        assert "jobs_without_url" not in server.handle_get_scouted_jobs({})

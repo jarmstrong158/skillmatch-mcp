@@ -24,6 +24,18 @@ SCOUTED_PATH = os.path.join(DATA_DIR, "scouted_jobs.json")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
+# Every tool that can surface a job returns this. A fit analysis the user cannot
+# act on is unfinished work: naming a company without its posting URL makes them
+# go and search for a listing this server already had the direct link to. The
+# instruction lives on the payload rather than in the docs because that is where
+# the model is actually reading at the moment it writes the answer.
+LINK_DIRECTIVE = (
+    "ALWAYS give the direct posting URL for every job you name, as a clickable "
+    "link, in the same place you name it — not collected at the end and not "
+    "omitted because it appeared earlier in the conversation. If a job has no "
+    "URL, say so explicitly rather than leaving it silent."
+)
+
 # URL patterns that are search result pages, NOT direct job postings
 BAD_URL_PATTERNS = [
     r"indeed\.com/q-",            # indeed search results
@@ -877,7 +889,8 @@ def handle_search_jobs(params):
         "search_query": search_query,
         "instructions": (
             "Use this query with a web search tool to find current job listings. "
-            "Filter results against the user's dealbreakers and salary floor."
+            "Filter results against the user's dealbreakers and salary floor. "
+            + LINK_DIRECTIVE
         ),
         "salary_floor": salary_floor,
         "dealbreakers": dealbreakers,
@@ -982,7 +995,8 @@ def handle_analyze_fit(params):
     instructions += (
         "Weight project evidence heavily when hard requirements overlap with the GitHub portfolio. "
         "Project evidence and demonstrated output can and should compensate for formal experience gaps. "
-        "Consider the user's dealbreakers and salary floor. Give a clear recommendation with reasoning."
+        "Consider the user's dealbreakers and salary floor. Give a clear recommendation with reasoning. "
+        + LINK_DIRECTIVE
     )
 
     result = {
@@ -1049,7 +1063,8 @@ def handle_get_applications(params):
             rows = conn.execute("SELECT * FROM applications ORDER BY applied_at DESC").fetchall()
         conn.close()
         applications = [dict(row) for row in rows]
-        return {"count": len(applications), "applications": applications}
+        return {"count": len(applications), "applications": applications,
+                "instructions": LINK_DIRECTIVE}
     except Exception as e:
         return {"error": f"Failed to read applications: {e}"}
 
@@ -1132,7 +1147,8 @@ def handle_get_follow_ups(_params):
             d["days_since_applied"] = days
             follow_ups.append(d)
 
-        return {"count": len(follow_ups), "follow_ups": follow_ups}
+        return {"count": len(follow_ups), "follow_ups": follow_ups,
+                "instructions": LINK_DIRECTIVE}
     except Exception as e:
         return {"error": f"Failed to get follow-ups: {e}"}
 
@@ -1382,7 +1398,12 @@ def handle_get_scouted_jobs(params):
     unranked_only = params.get("unranked_only", False)
     if unranked_only:
         jobs = [j for j in jobs if not j.get("ranked", False)]
-    return {"count": len(jobs), "jobs": jobs}
+    missing = [f"{j.get('company')} - {j.get('role')}" for j in jobs if not j.get("url")]
+    out = {"count": len(jobs), "jobs": jobs, "instructions": LINK_DIRECTIVE}
+    if missing:
+        # Named so they cannot be silently presented as if they were actionable.
+        out["jobs_without_url"] = missing
+    return out
 
 
 def handle_mark_jobs_ranked(_params):
