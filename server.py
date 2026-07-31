@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """SkillMatch MCP Server - Job fit analyzer powered by Claude."""
 
+import functools
 import json
 import os
 import sqlite3
@@ -8,6 +9,12 @@ import sys
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+
+import anyio
+import mcp_types as types
+from mcp.server.caching import CacheHint
+from mcp.server.lowlevel.server import Server
+from mcp.server.stdio import stdio_server
 
 import ast
 import base64
@@ -23,6 +30,15 @@ DB_PATH = os.path.join(DATA_DIR, "applications.db")
 SCOUTED_PATH = os.path.join(DATA_DIR, "scouted_jobs.json")
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+# Single source of truth for serverInfo. Read from installed package metadata so
+# it cannot drift from pyproject.toml the way the previous hardcoded "1.0.0"
+# did, while the package itself was at 1.0.2.
+try:
+    from importlib.metadata import version as _pkg_version
+    SERVER_VERSION = _pkg_version("skillmatch-mcp")
+except Exception:
+    SERVER_VERSION = "0.0.0+local"
 
 # Every tool that can surface a job returns this. A fit analysis the user cannot
 # act on is unfinished work: naming a company without its posting URL makes them
@@ -1896,82 +1912,89 @@ HANDLERS = {
 }
 
 
-# --- JSON-RPC stdio transport (line-delimited JSON) ---
+# --- MCP transport (protocol revision 2026-07-28, SDK mcp>=2.0,<3) ---
+#
+# This used to be a hand-rolled line-delimited JSON-RPC loop that answered
+# `initialize` with protocolVersion 2024-11-05. The 2026-07-28 revision drops
+# the handshake entirely and requires server/discover, per-request version
+# negotiation, resultType on every result, and ttlMs/cacheScope on cacheable
+# results. Rather than reimplement all of that, the loop is now the SDK's.
+#
+# The low-level Server is used deliberately in preference to MCPServer's
+# decorators: TOOLS is 21 hand-written schemas on a package that is published
+# to PyPI, and deriving them from function signatures instead would risk silent
+# schema drift for every existing installation. TOOLS and HANDLERS are passed
+# through verbatim.
+
+
+def _tool_models() -> list[types.Tool]:
+    """TOOLS as SDK models. The dicts are already in wire shape, so this is a
+    validation pass, not a translation: `Tool.model_dump(by_alias=True)` returns
+    what was written in TOOLS."""
+    return [types.Tool.model_validate(tool) for tool in TOOLS]
+
+
+async def _on_list_tools(_ctx, _params) -> types.ListToolsResult:
+    return types.ListToolsResult(tools=_tool_models())
+
+
+async def _on_call_tool(_ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
+    """Dispatch to HANDLERS, preserving the pre-migration result contract.
+
+    Errors are returned as `isError` results rather than raised, because raising
+    would replace the structured {"error": ...} body with the SDK's
+    "Error executing tool ..." wrapper, which existing clients do not expect.
+    """
+    handler = HANDLERS.get(params.name)
+
+    if handler is None:
+        # Note: no indent here, matching the pre-migration wire output exactly.
+        return types.CallToolResult(
+            content=[types.TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {params.name}"}))],
+            is_error=True,
+        )
+
+    arguments = params.arguments or {}
+    try:
+        # The handlers are synchronous and several do blocking network and
+        # sqlite I/O, so they run on a worker thread rather than stalling the
+        # event loop and every concurrent request with them.
+        result = await anyio.to_thread.run_sync(functools.partial(handler, arguments))
+        is_error = isinstance(result, dict) and "error" in result
+    except Exception as e:
+        result = {"error": f"Tool '{params.name}' failed: {e}"}
+        is_error = True
+
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(result, indent=2))],
+        is_error=is_error,
+    )
+
+
+# The tool list is static code, identical for every caller with no auth-scoped
+# variation, so a shared intermediary may cache it. Tool *results* are
+# caller-specific (they read this user's profile and applications), but
+# tools/call is not a cacheable method, so none of that is cached.
+server = Server(
+    "skillmatch-mcp",
+    version=SERVER_VERSION,
+    cache_hints={
+        "tools/list": CacheHint(ttl_ms=300_000, scope="public"),
+        "server/discover": CacheHint(ttl_ms=300_000, scope="public"),
+    },
+    on_list_tools=_on_list_tools,
+    on_call_tool=_on_call_tool,
+)
+
+
+async def _serve() -> None:
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
 def main():
     ensure_data_dir()
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        msg_id = msg.get("id")
-        method = msg.get("method", "")
-        params = msg.get("params", {})
-
-        if method == "initialize":
-            response = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "skillmatch-mcp", "version": "1.0.0"},
-                },
-            }
-        elif method == "notifications/initialized":
-            continue
-        elif method == "tools/list":
-            response = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {"tools": TOOLS},
-            }
-        elif method == "tools/call":
-            tool_name = params.get("name", "")
-            tool_args = params.get("arguments", {})
-            handler = HANDLERS.get(tool_name)
-
-            if handler is None:
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {
-                        "content": [{"type": "text", "text": json.dumps({"error": f"Unknown tool: {tool_name}"})}],
-                        "isError": True,
-                    },
-                }
-            else:
-                try:
-                    result = handler(tool_args)
-                    is_error = isinstance(result, dict) and "error" in result
-                except Exception as e:
-                    result = {"error": f"Tool '{tool_name}' failed: {e}"}
-                    is_error = True
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": msg_id,
-                    "result": {
-                        "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
-                        "isError": is_error,
-                    },
-                }
-        elif method.startswith("notifications/"):
-            continue
-        else:
-            response = {
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "error": {"code": -32601, "message": f"Method not found: {method}"},
-            }
-
-        sys.stdout.write(json.dumps(response) + "\n")
-        sys.stdout.flush()
+    anyio.run(_serve)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,9 @@ from io import BytesIO, StringIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import anyio
 import pytest
+from mcp.client.client import Client
 
 # ---------------------------------------------------------------------------
 # Path setup — import server.py from parent directory
@@ -973,53 +975,59 @@ class TestToolCallIsError:
     an error, not just when the tool name is unknown."""
 
     def _dispatch(self, monkeypatch, capsys, tool_name, handlers=None):
-        request = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {"name": tool_name, "arguments": {}},
-        }
+        """Call `tool_name` and return the CallToolResult in wire form.
+
+        This used to stuff a raw JSON-RPC line into stdin and read the reply off
+        stdout, because the server hand-rolled its own line-delimited loop. That
+        loop is gone as of protocol revision 2026-07-28 (there is no handshake
+        to open, and requests now carry `_meta`), so the same contract is
+        exercised through a real in-process client instead. Every assertion in
+        this class is unchanged apart from the response no longer being wrapped
+        in a JSON-RPC envelope.
+        """
         if handlers:
             for name, fn in handlers.items():
                 monkeypatch.setitem(server.HANDLERS, name, fn)
-        monkeypatch.setattr(server, "ensure_data_dir", lambda: None)
-        monkeypatch.setattr(sys, "stdin", StringIO(json.dumps(request) + "\n"))
-        server.main()
-        return json.loads(capsys.readouterr().out.strip())
+
+        async def main():
+            async with Client(server.server) as client:
+                return await client.call_tool(tool_name, {})
+
+        return anyio.run(main).model_dump(by_alias=True, exclude_none=True)
 
     def test_success_result_is_not_flagged(self, monkeypatch, capsys):
         response = self._dispatch(
             monkeypatch, capsys, "_ok_tool",
             {"_ok_tool": lambda args: {"status": "ok"}},
         )
-        assert response["result"]["isError"] is False
+        assert response["isError"] is False
 
     def test_handler_error_dict_is_flagged(self, monkeypatch, capsys):
         response = self._dispatch(
             monkeypatch, capsys, "_err_tool",
             {"_err_tool": lambda args: {"error": "no profile found"}},
         )
-        assert response["result"]["isError"] is True
-        assert "no profile found" in response["result"]["content"][0]["text"]
+        assert response["isError"] is True
+        assert "no profile found" in response["content"][0]["text"]
 
     def test_handler_exception_is_flagged(self, monkeypatch, capsys):
         def boom(args):
             raise RuntimeError("kaboom")
 
         response = self._dispatch(monkeypatch, capsys, "_boom_tool", {"_boom_tool": boom})
-        assert response["result"]["isError"] is True
-        assert "kaboom" in response["result"]["content"][0]["text"]
+        assert response["isError"] is True
+        assert "kaboom" in response["content"][0]["text"]
 
     def test_unknown_tool_is_flagged(self, monkeypatch, capsys):
         response = self._dispatch(monkeypatch, capsys, "_does_not_exist")
-        assert response["result"]["isError"] is True
+        assert response["isError"] is True
 
     def test_non_dict_result_is_not_flagged(self, monkeypatch, capsys):
         response = self._dispatch(
             monkeypatch, capsys, "_list_tool",
             {"_list_tool": lambda args: ["error", "not really"]},
         )
-        assert response["result"]["isError"] is False
+        assert response["isError"] is False
 
 
 # ---------------------------------------------------------------------------

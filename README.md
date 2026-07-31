@@ -24,6 +24,15 @@ cd skillmatch-mcp
 pip install -r requirements.txt
 ```
 
+Speaks **MCP protocol revision `2026-07-28`** over stdio, on SDK `mcp>=2.0,<3`. It is stateless:
+no `initialize` handshake and no session id, with every request carrying its own protocol version
+and client identity. `tools/list` and `server/discover` return `ttlMs`/`cacheScope` freshness
+hints, and tool order is stable across calls so client-side and prompt caches keep hitting.
+
+> **Upgrading from 1.x:** 2.0.0 drops the `initialize` handshake, so it requires a client that
+> speaks `2026-07-28`. Tool names, schemas, and results are unchanged — only the transport moved.
+> Stay on 1.x if you need to serve an older client.
+
 ### 2. Add to Claude
 
 **Claude Code (CLI):**
