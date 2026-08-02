@@ -325,8 +325,22 @@ TOOLS = [
     {
         "name": "get_scouted_jobs",
         "description": (
-            "Return all scouted job listings from scouted_jobs.json. "
-            "Optionally filter to only unranked jobs."
+            "Read back job listings that were SCOUTED but not yet applied to. Scouted jobs "
+            "are candidates found while searching; they live in data/scouted_jobs.json and "
+            "are separate from applications.\n\n"
+            "When to use this instead of the alternatives: get_scouted_jobs lists jobs the "
+            "user has NOT applied to yet. get_applications lists ones they have. "
+            "save_scouted_job adds to this list; mark_jobs_ranked clears the unranked flag "
+            "after a ranking pass.\n\n"
+            "The normal ranking loop is: call this with unranked_only=true, rank what comes "
+            "back, present it, then call mark_jobs_ranked so the same jobs are not ranked "
+            "again next time. Calling this without unranked_only returns everything ever "
+            "scouted, including jobs already ranked and possibly already applied to.\n\n"
+            "Side effects: none. This is a pure read and does not mark anything as ranked — "
+            "that is mark_jobs_ranked's job, and forgetting it is why jobs reappear.\n\n"
+            "Returns JSON: a list of listings (company, role, url, salary, location, remote, "
+            "source, date_found, ranked) plus a count. An empty list means nothing has been "
+            "scouted yet, not an error."
         ),
         "inputSchema": {
             "type": "object",
@@ -365,8 +379,25 @@ TOOLS = [
     {
         "name": "update_application",
         "description": (
-            "Update an existing application by ID. Accepts any subset of fields: status, notes, "
-            "follow_up_due_date, response_received, outcome. Automatically updates last_activity_date."
+            "Update an application that is ALREADY tracked, by its numeric id. Use this as the "
+            "user's situation moves: a recruiter replies, an interview is scheduled, an offer "
+            "lands, or the role goes quiet.\n\n"
+            "When to use this instead of the alternatives: update_application changes an "
+            "EXISTING row and requires an id. log_application creates a new one and must be "
+            "used for a job not tracked yet — this tool will not create anything, and an "
+            "unknown id is an error rather than an insert. Get ids from get_applications or "
+            "get_follow_ups. If the user re-applies to the same company for a DIFFERENT role, "
+            "that is a new application, not an update.\n\n"
+            "Every field is optional; pass only what changed. Omitted fields keep their "
+            "current values and are not cleared.\n\n"
+            "Side effects: writes to the local SQLite database at data/applications.db and "
+            "always refreshes last_activity_date, so the row's position in recency-ordered "
+            "views changes even for a notes-only edit. Setting status to applied or screening "
+            "together with follow_up_due_date is what makes the row appear in get_follow_ups "
+            "once that date passes; a terminal status (offer, rejected, ghosted) takes it out "
+            "of the follow-up queue.\n\n"
+            "Returns JSON: the full updated application row. On failure returns "
+            "{\"error\": ...} — most often because the id does not exist."
         ),
         "inputSchema": {
             "type": "object",
@@ -404,8 +435,24 @@ TOOLS = [
     {
         "name": "add_resume",
         "description": (
-            "Add a new resume variant to the profile. Each variant targets specific role types "
-            "for automatic selection during fit analysis."
+            "Add a resume VARIANT to the profile, so fit analysis can pick the right one "
+            "automatically. Each variant declares the role_types it targets; analyze_fit "
+            "detects a role_type from the job description and selects the matching variant "
+            "without being asked.\n\n"
+            "When to use this instead of the alternatives: add_resume registers a NEW "
+            "variant. list_resumes shows what is already registered. get_resume reads back "
+            "the stored text of one. update_profile changes other profile fields and does "
+            "not touch resumes. Use this when the candidate has a genuinely different resume "
+            "for a different kind of role, not to correct a typo in an existing one.\n\n"
+            "Supply exactly one of `path` or `text`. `path` is read from disk at call time "
+            "(.txt, .md and .docx are supported) and the CONTENT is stored, so later edits to "
+            "that file are not picked up — re-add the variant to refresh it. `text` stores "
+            "what you pass verbatim and needs no file.\n\n"
+            "Side effects: writes to data/profile.json on this machine. Re-using an existing "
+            "`id` REPLACES that variant rather than adding a second one, so ids are the "
+            "update mechanism. Nothing is uploaded anywhere.\n\n"
+            "Returns JSON with the saved variant and the full list of registered ids, or "
+            "{\"error\": ...} if neither path nor text was given, or the path could not be read."
         ),
         "inputSchema": {
             "type": "object",
