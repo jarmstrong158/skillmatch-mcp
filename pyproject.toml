@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skillmatch-mcp"
-version = "1.0.2"
+version = "2.0.0"
 description = "Job search and ranking pipeline accessible via MCP (Model Context Protocol)"
 readme = "README.md"
 license = "MIT"
@@ -24,6 +24,9 @@ classifiers = [
 ]
 dependencies = [
     "python-docx>=1.0.0",
+    # SDK v2 speaks MCP protocol revision 2026-07-28. v1 cannot, and v2 removed
+    # mcp.server.fastmcp, so the major is pinned.
+    "mcp>=2.0,<3",
 ]
 
 [project.optional-dependencies]
